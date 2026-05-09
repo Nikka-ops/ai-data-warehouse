@@ -1,0 +1,118 @@
+version: "3.8"
+
+services:
+
+  # ─── Zookeeper（Kafka 依赖）────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: ai_dw_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Kafka ────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: ai_dw_kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"       # 外部访问（Python 生产者用）
+      - "29092:29092"     # 内部访问（ClickHouse 消费用）
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 24        # 消息保留24小时
+      KAFKA_LOG_SEGMENT_BYTES: 104857600   # 100MB每段
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ─── Kafka UI（可视化管理）────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ai_dw_kafka_ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+
+  # ─── ClickHouse ────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: ai_dw_clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_init:/docker-entrypoint-initdb.d
+    environment:
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: admin123
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user=admin", "--password=admin123", "--query=SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Airflow ───────────────────────────────────────────────
+  airflow:
+    image: apache/airflow:2.8.1-python3.11
+    container_name: ai_dw_airflow
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - airflow_logs:/opt/airflow/logs
+      - airflow_dags:/opt/airflow/dags
+      - airflow_data:/opt/airflow/data
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__WEBSERVER__SECRET_KEY: "ai-dw-secret-2025"
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: admin123
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin123
+    command: >
+      bash -c "
+        pip install clickhouse-connect kafka-python --quiet &&
+        airflow db init &&
+        airflow users create --username admin --password admin123
+          --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+        airflow webserver --port 8080 &
+        airflow scheduler
+      "
+
+volumes:
+  clickhouse_data:
+  clickhouse_init:
+  airflow_logs:
+  airflow_dags:
+  airflow_data:

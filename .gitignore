@@ -1,0 +1,45 @@
+# 环境变量（含 API Key，绝对不能提交）
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+
+# 数据文件（太大，用说明代替）
+data/raw/*.csv
+data/raw/*.json
+
+# ChromaDB 向量库（本地生成，不需要提交）
+chroma_db/
+
+# 临时文件
+*.tmp
+str
+fix_encoding.py
+test_agent.py
+
+# phase 备份目录
+phase2/
+phase3/
+phase4/
+phase6/
+
+# 日志
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Docker 数据卷
+clickhouse_data/
+airflow_logs/
