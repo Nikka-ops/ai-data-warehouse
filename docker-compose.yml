@@ -1,8 +1,18 @@
 version: "3.8"
 
+# ── 共享环境变量 ───────────────────────────────────────────────
+x-common-env: &common-env
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
 services:
 
-  # ─── Zookeeper（Kafka 依赖）────────────────────────────────
+  # ─── Zookeeper ────────────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: ai_dw_zookeeper
@@ -23,8 +33,8 @@ services:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9092:9092"       # 外部访问（Python 生产者用）
-      - "29092:29092"     # 内部访问（ClickHouse 消费用）
+      - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -32,15 +42,15 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_LOG_RETENTION_HOURS: 24        # 消息保留24小时
-      KAFKA_LOG_SEGMENT_BYTES: 104857600   # 100MB每段
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_SEGMENT_BYTES: 104857600
     healthcheck:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 15s
       timeout: 10s
       retries: 5
 
-  # ─── Kafka UI（可视化管理）────────────────────────────────
+  # ─── Kafka UI ─────────────────────────────────────────────
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: ai_dw_kafka_ui
@@ -62,16 +72,109 @@ services:
       - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
-      - clickhouse_init:/docker-entrypoint-initdb.d
+      - ./clickhouse/init:/docker-entrypoint-initdb.d
     environment:
-      CLICKHOUSE_USER: admin
-      CLICKHOUSE_PASSWORD: admin123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--user=admin", "--password=admin123", "--query=SELECT 1"]
+      test: ["CMD", "clickhouse-client",
+             "--user=${CLICKHOUSE_USER:-admin}",
+             "--password=${CLICKHOUSE_PASSWORD:-admin123}",
+             "--query=SELECT 1"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ─── Flink JobManager ─────────────────────────────────────
+  flink-jobmanager:
+    image: flink:1.18-scala_2.12
+    container_name: ai_dw_flink_jm
+    command: jobmanager
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "8081:8081"    # Flink Web UI
+    environment:
+      <<: *common-env
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        parallelism.default: 2
+        state.backend: filesystem
+        state.checkpoints.dir: file:///flink-checkpoints
+        execution.checkpointing.interval: 60s
+    volumes:
+      - flink_checkpoints:/flink-checkpoints
+      - ./flink:/opt/flink/jobs            # 挂载作业代码
+      - .:/opt/flink/project               # 挂载整个项目（含 config.py）
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ─── Flink TaskManager ────────────────────────────────────
+  flink-taskmanager:
+    image: flink:1.18-scala_2.12
+    container_name: ai_dw_flink_tm
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        parallelism.default: 2
+    volumes:
+      - flink_checkpoints:/flink-checkpoints
+      - ./flink:/opt/flink/jobs
+      - .:/opt/flink/project
+
+  # ─── Flink Python 作业提交器 ─────────────────────────────
+  flink-job-submitter:
+    image: flink:1.18-scala_2.12
+    container_name: ai_dw_flink_submit
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    command: >
+      bash -c "
+        pip install apache-flink kafka-python clickhouse-connect openai python-dotenv --quiet &&
+        cd /opt/flink/project &&
+        python flink/flink_stream_job.py --mode python
+      "
+    environment:
+      <<: *common-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_ORDERS_TOPIC: orders_stream
+      KAFKA_PAYMENTS_TOPIC: payments_stream
+      KAFKA_FLINK_STATS_TOPIC: flink.minute_stats
+      KAFKA_FLINK_DWD_TOPIC: flink.realtime_dwd
+      KAFKA_FLINK_ALERTS_TOPIC: flink.alerts
+    volumes:
+      - .:/opt/flink/project
+    restart: on-failure
+
+  # ─── Kafka 生产者（模拟实时订单）────────────────────────
+  kafka-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: ai_dw_producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    command: python kafka/producer.py --mode normal --rate 10
+    restart: on-failure
 
   # ─── Airflow ───────────────────────────────────────────────
   airflow:
@@ -86,33 +189,46 @@ services:
       - "8080:8080"
     volumes:
       - airflow_logs:/opt/airflow/logs
-      - airflow_dags:/opt/airflow/dags
-      - airflow_data:/opt/airflow/data
+      - ./pipelines:/opt/airflow/dags
+      - .:/opt/airflow/project
     environment:
+      <<: *common-env
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
-      AIRFLOW__WEBSERVER__SECRET_KEY: "ai-dw-secret-2025"
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_USER: admin
-      CLICKHOUSE_PASSWORD: admin123
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-ai-dw-secret-change-me}
       _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin123
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-admin123}
     command: >
       bash -c "
-        pip install clickhouse-connect kafka-python --quiet &&
+        pip install clickhouse-connect kafka-python tenacity apscheduler python-dotenv --quiet &&
         airflow db init &&
-        airflow users create --username admin --password admin123
+        airflow users create --username ${AIRFLOW_USER:-admin} --password ${AIRFLOW_PASSWORD:-admin123}
           --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
         airflow webserver --port 8080 &
         airflow scheduler
       "
 
+  # ─── Streamlit 看板 ───────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: ai_dw_dashboard
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    environment:
+      <<: *common-env
+    volumes:
+      - .:/app
+    command: streamlit run app/dashboard.py --server.port 8501 --server.address 0.0.0.0
+    restart: on-failure
+
 volumes:
   clickhouse_data:
-  clickhouse_init:
+  flink_checkpoints:
   airflow_logs:
-  airflow_dags:
-  airflow_data:
