@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-三个专用 Agent - Tool Calling 模式
-工具定义统一来自 ai_layer/tools.py
-"""
+"""三个实时数据分析 Agent（Tool Calling 模式）"""
 import os, sys
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_tool_calling_agent, AgentExecutor
@@ -12,139 +9,134 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 from ai_layer.tools import (
-    query_data, query_knowledge, calculate_anomalies,
+    query_data, query_knowledge, detect_realtime_anomaly,
     generate_insight, save_report, ALL_TOOLS,
 )
 
 log = get_logger('agents')
 
 
-def get_llm(temperature: float | None = None):
+def _get_llm():
     return ChatOpenAI(
         api_key=cfg.api_key,
         base_url=cfg.api_base_url,
         model=cfg.llm_model,
-        temperature=temperature if temperature is not None else cfg.agent_temperature,
+        temperature=cfg.agent_temperature,
         max_tokens=2000,
         timeout=90,
     )
 
 
 def _make_executor(tools: list, system_msg: str, max_iter: int = 10) -> AgentExecutor:
-    llm = get_llm()
     prompt = ChatPromptTemplate.from_messages([
         ('system', system_msg),
         ('human', '{input}'),
         ('placeholder', '{agent_scratchpad}'),
     ])
-    agent = create_tool_calling_agent(llm, tools, prompt)
+    agent = create_tool_calling_agent(_get_llm(), tools, prompt)
     return AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=True,
-        max_iterations=max_iter,
+        agent=agent, tools=tools,
+        verbose=True, max_iterations=max_iter,
         return_intermediate_steps=True,
         handle_parsing_errors=True,
     )
 
 
 # ══════════════════════════════════════════════════════════════
-# Agent 1：销售异常分析（支持历史 + 实时异常检测）
+# Agent 1：实时异常检测
 # ══════════════════════════════════════════════════════════════
 
-ANOMALY_SYSTEM = """你是一位专业的数据分析师，擅长销售异常检测。
+ANOMALY_SYSTEM = """你是实时数据监控专家，负责检测流式数据中的异常并分析原因。
 
-历史数据异常分析步骤：
-1. 用 calculate_anomalies 检测 dws.order_daily 表 gmv 字段的异常，where条件 dt >= '2017-01-01'
-2. 用 query_data 查询异常峰值日期前后14天每日数据
-3. 用 query_knowledge 查询"巴西电商节日规律"
-4. 用 generate_insight 生成异常原因分析
-5. 用 save_report 保存完整报告，标题"销售异常分析报告"
+执行步骤：
+1. 用 detect_realtime_anomaly 检测最近60分钟的 order_cnt 异常
+2. 用 detect_realtime_anomaly 检测最近60分钟的 total_gmv 异常
+3. 用 query_data 查询当前最新5个分钟窗口：
+   SELECT window_start, order_cnt, total_gmv, avg_price, top_category
+   FROM dws.realtime_minute_stats ORDER BY window_start DESC LIMIT 5
+4. 用 query_data 查询最新告警：
+   SELECT alert_time, severity, alert_type, detail, ai_suggestion
+   FROM stream.ai_quality_alerts ORDER BY alert_time DESC LIMIT 10
+5. 用 generate_insight 综合以上结果生成异常分析
+6. 用 save_report 保存报告，标题"实时异常检测报告"
 
-实时数据异常分析步骤（如果用户要求实时）：
-1. 用 query_data 查询最近30分钟的分钟统计：SELECT * FROM dws.realtime_minute_stats WHERE window_start >= now() - INTERVAL 30 MINUTE ORDER BY window_start
-2. 用 calculate_anomalies 检测 dws.realtime_minute_stats 的 total_gmv 字段异常
-3. 用 query_data 查询 stream.ai_quality_alerts 中的最新告警
-4. 用 generate_insight 分析实时异常原因
-5. 用 save_report 保存报告
+完成后给出结论：当前流量状态是否正常，主要风险点是什么。"""
 
-完成所有步骤后给出最终结论。"""
 
-def run_anomaly_agent(realtime: bool = False):
-    tools = [query_data, calculate_anomalies, query_knowledge, generate_insight, save_report]
-    executor = _make_executor(tools, ANOMALY_SYSTEM, max_iter=10)
-    mode = '实时' if realtime else '历史'
-    log.info('启动异常分析 Agent（%s模式）', mode)
-    result = executor.invoke({'input': f'请对{"实时流" if realtime else "历史"}销售数据进行异常检测分析'})
-    return result
+def run_anomaly_agent():
+    tools = [query_data, detect_realtime_anomaly, query_knowledge, generate_insight, save_report]
+    log.info('启动实时异常检测 Agent')
+    return _make_executor(tools, ANOMALY_SYSTEM, max_iter=10).invoke(
+        {'input': '请对当前实时流数据进行全面异常检测，输出检测报告'}
+    )
 
 
 # ══════════════════════════════════════════════════════════════
-# Agent 2：自动周报（含实时快照）
+# Agent 2：实时运营快报
 # ══════════════════════════════════════════════════════════════
 
-WEEKLY_SYSTEM = """你是一位数据分析师，负责生成每周数据报告，报告同时包含历史趋势和实时快照。
+REPORT_SYSTEM = """你是实时运营数据分析师，负责生成当前时段的运营快报。
 
-按以下步骤生成完整周报：
-1. 用 query_data 查月度KPI（历史趋势）：
-   SELECT ym, round(gmv,0) AS GMV, order_cnt AS 订单数, user_cnt AS 用户数, round(mom_gmv_rate,2) AS 环比增长率 FROM ads.monthly_kpi ORDER BY ym DESC LIMIT 6
-2. 用 query_data 查品类Top10：
-   SELECT product_category AS 品类, round(sum(gmv),0) AS 总GMV, sum(order_cnt) AS 订单数 FROM dws.category_daily GROUP BY product_category ORDER BY 总GMV DESC LIMIT 10
-3. 用 query_data 查最新月省份排行：
-   SELECT state AS 州, round(gmv,0) AS GMV, rank_by_gmv AS 排名 FROM ads.state_sales_rank WHERE dt_month=(SELECT max(dt_month) FROM ads.state_sales_rank) ORDER BY rank_by_gmv LIMIT 10
-4. 用 query_data 查今日实时快照：
-   SELECT count(*) AS 今日订单数, round(sum(price),0) AS 今日GMV, round(avg(price),2) AS 均价 FROM ods.orders_stream WHERE event_time >= today()
-5. 用 generate_insight 对GMV趋势和品类数据生成洞察
-6. 用 save_report 整合为Markdown周报保存，标题"数据分析周报"
+执行步骤：
+1. 用 query_data 查今日小时趋势：
+   SELECT * FROM ads.realtime_hourly ORDER BY hour_start DESC LIMIT 12
+2. 用 query_data 查今日品类排行：
+   SELECT * FROM ads.realtime_category_today LIMIT 10
+3. 用 query_data 查今日各州排行：
+   SELECT * FROM ads.realtime_state_today LIMIT 10
+4. 用 query_data 查最近10分钟分钟统计：
+   SELECT window_start, order_cnt, total_gmv, avg_price, top_category
+   FROM dws.realtime_minute_stats ORDER BY window_start DESC LIMIT 10
+5. 用 query_data 查最新告警（如有）：
+   SELECT severity, detail FROM stream.ai_quality_alerts
+   WHERE alert_time >= now() - INTERVAL 1 HOUR ORDER BY alert_time DESC LIMIT 5
+6. 用 generate_insight 生成今日运营洞察
+7. 用 save_report 保存报告，标题"实时运营快报"
 
-最终输出周报摘要。"""
+输出今日运营核心数据摘要。"""
 
-def run_weekly_report_agent():
+
+def run_report_agent():
     tools = [query_data, generate_insight, save_report]
-    executor = _make_executor(tools, WEEKLY_SYSTEM, max_iter=10)
-    log.info('启动自动周报 Agent')
-    return executor.invoke({'input': '请生成本周数据分析周报（含历史趋势和今日实时快照）'})
+    log.info('启动实时运营快报 Agent')
+    return _make_executor(tools, REPORT_SYSTEM, max_iter=10).invoke(
+        {'input': '请生成当前时段的实时运营快报'}
+    )
 
 
 # ══════════════════════════════════════════════════════════════
-# Agent 3：自由分析
+# Agent 3：自由分析（全工具权限）
 # ══════════════════════════════════════════════════════════════
 
-FREE_SYSTEM = """你是一位专业的数据分析师，可分析历史数据和实时流数据。
+FREE_SYSTEM = """你是实时数据分析师，可自由调用工具分析实时流数据。
 
-可用工具：query_data / query_knowledge / calculate_anomalies / generate_insight / save_report
+可用工具：query_data / query_knowledge / detect_realtime_anomaly / generate_insight / save_report
 
-可用数据表：
-历史数据（2016-2018）：
-- ads.monthly_kpi：ym、gmv、order_cnt、user_cnt、mom_gmv_rate
-- dws.category_daily：dt、product_category、gmv、order_cnt
-- dws.order_daily：dt、gmv、order_cnt、user_cnt、avg_order_value
-- ads.state_sales_rank：dt_month、state、gmv、order_cnt、rank_by_gmv
-- dwd.order_detail：order_date、state、product_category、price、order_status、delivery_days
+可用实时表：
+- ods.orders_stream         原始订单流（price/state/product_category/order_status/event_time）
+- ods.payments_stream       原始支付流（payment_type/payment_value/event_time）
+- dwd.realtime_order_detail 订单+支付宽表（Flink JOIN）
+- dws.realtime_minute_stats 分钟级聚合（Flink窗口：order_cnt/total_gmv/avg_price）
+- stream.ai_quality_alerts  AI告警
+- ads.realtime_hourly       今日小时视图（直接 SELECT）
+- ads.realtime_category_today  今日品类视图
+- ads.realtime_state_today     今日州排行视图
 
-实时数据（近24小时）：
-- ods.orders_stream：order_id、customer_id、product_category、price、state、order_status、event_time
-- dwd.realtime_order_detail：product_category、state、price、payment_type、order_status、event_date
-- dws.realtime_minute_stats：window_start、window_end、order_cnt、total_gmv、avg_price
-- stream.ai_quality_alerts：alert_time、alert_type、severity、detail、ai_suggestion
+工作原则：先查数据 → 分析发现 → 生成洞察 → 保存报告，用中文回答，结论要有数字支撑。"""
 
-原则：先查数据 → 再生成洞察 → 最后保存报告，中文回答，结论要有数字支撑。"""
 
 def run_free_agent(user_goal: str):
-    executor = _make_executor(ALL_TOOLS, FREE_SYSTEM, max_iter=12)
-    log.info('启动自由分析 Agent：%s', user_goal[:50])
-    return executor.invoke({'input': user_goal})
+    log.info('启动自由分析 Agent：%s', user_goal[:60])
+    return _make_executor(ALL_TOOLS, FREE_SYSTEM, max_iter=12).invoke({'input': user_goal})
 
 
 if __name__ == '__main__':
     import sys
     mode = sys.argv[1] if len(sys.argv) > 1 else '3'
     if mode == '1':
-        result = run_anomaly_agent()
-    elif mode == '1r':
-        result = run_anomaly_agent(realtime=True)
+        r = run_anomaly_agent()
     elif mode == '2':
-        result = run_weekly_report_agent()
+        r = run_report_agent()
     else:
-        result = run_free_agent('分析今日实时销售情况，对比历史同期，给出洞察报告')
-    print('\n最终结论：', result['output'])
+        r = run_free_agent('分析当前实时订单流量，找出异常，生成分析报告')
+    print('\n最终结论：', r['output'])
