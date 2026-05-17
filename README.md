@@ -1,42 +1,24 @@
-# 🤖 AI 智能数仓系统
+# 实时 AI 数仓系统
 
-> 基于巴西电商真实数据，从零构建 AI 增强数据仓库。覆盖离线批处理与实时流处理双链路，集成 NL2SQL、RAG 知识库、LangChain Agent 三大 AI 能力。
+> 纯实时流处理架构：Kafka → Flink → ClickHouse，集成 NL2SQL、RAG 知识库、LangChain Agent 三大 AI 能力，支持自然语言查询实时数据。
 
 [![Python](https://img.shields.io/badge/Python-3.11-blue)](https://python.org)
+[![Flink](https://img.shields.io/badge/Apache_Flink-1.18-orange)](https://flink.apache.org)
 [![ClickHouse](https://img.shields.io/badge/ClickHouse-24.3-yellow)](https://clickhouse.com)
-[![LangChain](https://img.shields.io/badge/LangChain-0.3.25-green)](https://langchain.com)
 [![Kafka](https://img.shields.io/badge/Apache_Kafka-7.5-red)](https://kafka.apache.org)
+[![LangChain](https://img.shields.io/badge/LangChain-0.3.25-green)](https://langchain.com)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 ---
 
-## 📋 目录
+## 目录
 
-- [项目简介](#项目简介)
 - [系统架构](#系统架构)
 - [技术栈](#技术栈)
-- [六个阶段](#六个阶段)
-- [核心功能演示](#核心功能演示)
+- [数据流转](#数据流转)
+- [AI 能力](#ai-能力)
 - [快速启动](#快速启动)
 - [项目结构](#项目结构)
-- [数据集](#数据集)
-
----
-
-## 项目简介
-
-本项目以 **Kaggle 巴西电商平台 Olist 真实数据**（112,650 条订单）为底座，分六个阶段逐步构建一个具备 AI 能力的完整数据仓库系统。
-
-**核心价值：让不懂 SQL 的业务人员也能直接用中文查数据、问问题、获取分析洞察。**
-
-| 指标 | 数值 |
-|------|------|
-| 总 GMV | R$ 13,591,644 |
-| 订单总数 | 98,666 单 |
-| 独立用户数 | 97,729 人 |
-| 平均客单价 | R$ 132.71 |
-| 知识库文本块 | 36 个 |
-| Agent 最大推理步数 | 10 步 |
 
 ---
 
@@ -44,23 +26,32 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      应用层（Streamlit）                      │
-│   智能问答  │  异常检测Agent  │  自动周报Agent  │  自由分析Agent│
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                      AI 能力层                               │
-│   NL2SQL（DeepSeek）  │  RAG（ChromaDB）  │  Agent（LangChain）│
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                   数仓存储层（ClickHouse）                    │
-│  ADS（应用层）│ DWS（汇总层）│ DWD（明细层）│ ODS（原始层）    │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│              数据接入层                                       │
-│    批量 ETL（Python）         Kafka 实时流                    │
+│                  应用层（Streamlit）                           │
+│   实时监控看板  │  NL2SQL 智能查询  │  Agent 自动分析          │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────┐
+│                    AI 能力层                                   │
+│   NL2SQL（实时表路由）  │  RAG（知识库）  │  Agent（多步推理）  │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────┐
+│              ClickHouse 实时数仓                               │
+│                                                               │
+│  stream.*          ODS              DWD            DWS / ADS  │
+│  Kafka Engine  →  orders_stream  →  realtime_     realtime_   │
+│  AI 告警           payments_stream   order_detail  minute_    │
+│                                                   stats       │
+│                                                   ads views   │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────┐
+│                    实时处理层                                  │
+│                                                               │
+│  Kafka Producer          Flink（1分钟滚动窗口）                │
+│  （模拟订单流）    →     ├── 订单+支付 JOIN → DWD 宽表         │
+│  orders_stream           ├── 窗口聚合      → DWS 分钟统计     │
+│  payments_stream         └── 异常检测      → AI 告警表        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,158 +61,159 @@
 
 | 类别 | 技术 |
 |------|------|
-| 存储引擎 | ClickHouse 24.3（列式 OLAP） |
-| 数据建模 | dbt-clickhouse |
-| 工作流调度 | Apache Airflow 2.8 |
 | 消息队列 | Apache Kafka + Zookeeper |
-| 大语言模型 | DeepSeek-Chat（OpenAI 兼容） |
-| AI 框架 | LangChain 0.3.25（Tool Calling 模式） |
+| 实时流处理 | Apache Flink 1.18（PyFlink Table API / Python 模拟模式）|
+| 存储引擎 | ClickHouse 24.3（Kafka Engine + ReplacingMergeTree）|
+| 大语言模型 | DeepSeek-Chat（OpenAI 兼容接口）|
+| AI 框架 | LangChain 0.3.25（Tool Calling 模式）|
 | 向量数据库 | ChromaDB + SentenceTransformers |
-| Embedding 模型 | paraphrase-multilingual-MiniLM-L12-v2 |
-| 前端界面 | Streamlit 1.33 |
+| 前端 | Streamlit（自动刷新实时看板）|
+| 重试容错 | tenacity（指数退避）|
 | 容器化 | Docker Compose |
 
 ---
 
-## 六个阶段
+## 数据流转
 
-### 阶段一：数仓基础建设 ✅
-基于 ClickHouse 构建 ODS/DWD/DWS/ADS 四层数仓，使用 ReplacingMergeTree 引擎保障 ETL 幂等性，Airflow 实现全链路自动化调度。
-
-```
-Kaggle CSV → etl_ods.py → etl_dwd.py → etl_dws_ads.py → verify.py
-344,483行     112,650行     19,606行      583行
-```
-
-### 阶段二：NL2SQL 自然语言查询 ✅
-基于 DeepSeek 实现中文 → ClickHouse SQL 转换。动态注入真实表结构，通过正负面约束解决字段歧义，5 个业务查询场景全部通过。
-
-```python
-# 示例：用中文查数据
-result = nl2sql("每个月的GMV是多少？")
-# → 自动生成 SQL → 执行 → 返回结果 + AI 洞察
-```
-
-### 阶段三：RAG 知识库问答 ✅
-构建包含数据字典、指标口径、业务规则的向量知识库（36 个文本块），实现智能路由：自动判断"查数据"还是"问概念"。6 个知识问答准确率 100%。
-
-### 阶段四：LangChain Agent ✅
-基于 **Tool Calling 模式**（解决 ReAct + DeepSeek 兼容性问题）构建三个专用 Agent：
-
-| Agent | 步骤数 | 核心能力 |
-|-------|--------|----------|
-| 销售异常检测 | 5步 | 自动识别黑五峰值（偏差10.48倍），发现预热→爆发→余热三阶段 |
-| 自动周报生成 | 9步 | 多维数据查询，主动发现数据异常并标注预警 |
-| 自由分析 | 10步 | 自主追加3个分析维度，识别狂欢节低谷和春季旺季 |
-
-### 阶段五：AI 数仓建设助手 ✅
-上传任意 CSV → AI 自动识别字段含义 → 生成 ODS 建表 SQL → 建表写入 → AI 生成 ETL 逻辑 → 数据质量检测 → 生成 dbt 模型文件。
-
-### 阶段六：Kafka 实时流处理 ✅
-Python 生产者模拟实时订单流 → Kafka → ClickHouse Kafka 引擎自动消费（秒级）→ 物化视图落地 → 分钟级聚合 → AI 异常检测 → 告警写入。
+### 实时链路（全程自动，无需人工干预）
 
 ```
-累计流入：4,247+ 条  |  分钟聚合：~171单/分钟  |  GMV：R$55,421/分钟
+1. Kafka Producer 持续生产订单/支付消息
+         ↓
+2. ClickHouse Kafka Engine 自动消费 → ods.orders_stream / ods.payments_stream
+         ↓
+3. Flink 每1分钟一个滚动窗口：
+   - 订单 + 支付 JOIN → dwd.realtime_order_detail
+   - 聚合统计         → dws.realtime_minute_stats
+   - 异常检测         → stream.ai_quality_alerts
+         ↓
+4. ClickHouse 实时视图（ads.*）供 NL2SQL 直接查询
+         ↓
+5. Streamlit 看板自动刷新展示
 ```
+
+### ClickHouse 表说明
+
+| 表 / 视图 | 数据来源 | 说明 |
+|-----------|----------|------|
+| `ods.orders_stream` | Kafka Engine 物化视图 | 原始订单流，24小时 TTL |
+| `ods.payments_stream` | Kafka Engine 物化视图 | 原始支付流，24小时 TTL |
+| `dwd.realtime_order_detail` | Flink JOIN | 订单+支付宽表 |
+| `dws.realtime_minute_stats` | Flink 窗口聚合 | 分钟级统计，7天 TTL |
+| `stream.ai_quality_alerts` | Flink 异常检测 | AI 告警，30天 TTL |
+| `ads.realtime_hourly` | ClickHouse View | 今日小时趋势（自动 today() 过滤）|
+| `ads.realtime_category_today` | ClickHouse View | 今日品类排行 |
+| `ads.realtime_state_today` | ClickHouse View | 今日各州排行 |
 
 ---
 
-## 核心功能演示
+## AI 能力
 
-### NL2SQL 查询
-```
-用户：每个月的GMV是多少？
-系统：[自动生成SQL] SELECT ym, round(gmv,0) FROM ads.monthly_kpi ORDER BY ym
-      [执行结果] 24个月数据，2017-11月峰值...
-      [AI洞察] 黑色星期五当天GMV是日均的6.8倍...
-```
+### NL2SQL — 自然语言查询实时数据
 
-### RAG 知识问答
+自动将中文问题转换为 ClickHouse SQL，路由到正确的实时表：
+
 ```
-用户：GMV和销售额有什么区别？
-系统：[检索知识库] 相似度0.693...
-      GMV包含所有状态订单（含取消），反映平台交易规模；
-      实际销售额只计算delivered订单，反映真实成交。
+"最近10分钟订单量趋势"  →  SELECT ... FROM dws.realtime_minute_stats WHERE window_start >= now() - INTERVAL 10 MINUTE
+"今日品类销售排行"      →  SELECT * FROM ads.realtime_category_today
+"当前有哪些告警？"      →  SELECT ... FROM stream.ai_quality_alerts ORDER BY alert_time DESC
 ```
 
-### Agent 自动分析
+- Schema 缓存 TTL 5分钟（实时架构下缓存更短，及时感知结构变化）
+- 内置 SQL 安全校验（禁止写操作）
+
+### RAG — 知识库问答
+
+向量检索业务知识库，回答概念定义类问题：
+
 ```
-用户：分析2018年上半年销售趋势
-Agent步骤1：查知识库，了解GMV定义
-Agent步骤2：查月度数据（发现SQL格式错误，自动纠错）
-Agent步骤3：追加查订单状态分布（自主决策）
-Agent步骤4：追加查配送时效（自主决策）
-Agent步骤5：追加查取消率（自主决策）
-...
-Agent结论：2月受巴西狂欢节影响GMV最低，4-5月春季旺季...
+"order_status 有哪些状态？"  →  检索知识库 → 返回字段说明
+"payment_type 怎么分类？"    →  检索知识库 → 返回支付类型说明
 ```
+
+### Agent — 多步自动分析
+
+三个专用 Agent，均基于 DeepSeek Function Calling：
+
+| Agent | 功能 |
+|-------|------|
+| 异常检测 Agent | 检测分钟级流量异常（±2σ），查告警，生成检测报告 |
+| 运营快报 Agent | 汇总今日各维度数据（小时/品类/州），生成运营快报 |
+| 自由分析 Agent | 接受任意分析目标，自主决定查哪些表、如何分析 |
 
 ---
 
 ## 快速启动
 
 ### 前置要求
+
 - Docker Desktop
 - Python 3.11+
 - DeepSeek API Key（[申请地址](https://platform.deepseek.com)）
 
-### 1. 启动基础服务
+### 1. 克隆 & 配置
+
 ```bash
-git clone https://github.com/你的用户名/ai-data-warehouse.git
+git clone https://github.com/Nikka-ops/ai-data-warehouse.git
 cd ai-data-warehouse
+
+cp .env.example .env
+# 编辑 .env，填入 DEEPSEEK_API_KEY 和 CLICKHOUSE_PASSWORD
+```
+
+### 2. 启动所有服务
+
+```bash
 docker-compose up -d
 ```
 
-### 2. 安装依赖
+启动后服务会自动完成：
+- Kafka 准备好接收消息
+- ClickHouse 执行初始化 SQL（建库建表建物化视图）
+- Kafka Producer 开始生产模拟订单（10条/秒）
+- Flink 作业启动，开始处理实时流
+
+### 3. 安装 Python 依赖（本地开发用）
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
-```bash
-# Windows
-set DEEPSEEK_API_KEY=your_api_key_here
+### 4. 构建知识库（首次运行）
 
-# Mac/Linux
-export DEEPSEEK_API_KEY=your_api_key_here
-```
-
-### 4. 初始化数仓
-```bash
-# 下载数据集（需要 Kaggle 账号）
-# https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce
-# 将 CSV 文件放入 data/raw/
-
-# 运行 ETL
-python pipelines/etl_ods.py
-python pipelines/etl_dwd.py
-python pipelines/etl_dws_ads.py
-python pipelines/verify.py  # 验收
-```
-
-### 5. 构建知识库
 ```bash
 python ai_layer/rag_engine.py
 ```
 
-### 6. 启动 AI 数仓助手
-```bash
-# 历史数据查询 + RAG + Agent
-streamlit run app/dashboard_v3.py
+### 5. 启动看板（本地开发）
 
-# 实时流处理
-python kafka/producer.py --rate 5
-python kafka/stream_processor.py
+```bash
+streamlit run app/dashboard.py
 ```
 
-### 访问地址
+> Docker 模式下看板已通过 `dashboard` 服务自动启动。
 
-| 服务 | 地址 |
-|------|------|
-| AI 数仓助手 | http://localhost:8501 |
-| Kafka UI | http://localhost:8090 |
-| Airflow | http://localhost:8080 |
-| ClickHouse Play | http://localhost:8123/play |
+### 服务地址
+
+| 服务 | 地址 | 说明 |
+|------|------|------|
+| AI 数仓看板 | http://localhost:8501 | 主界面 |
+| Flink Web UI | http://localhost:8081 | 实时作业状态 |
+| Kafka UI | http://localhost:8090 | 消息队列管理 |
+| ClickHouse | http://localhost:8123/play | SQL 控制台 |
+
+### 本地单独运行（不用 Docker）
+
+```bash
+# 终端 1：生产者
+python kafka/producer.py --mode normal --rate 10
+
+# 终端 2：Flink 流处理（Python 模拟模式）
+python flink/flink_stream_job.py --mode python
+
+# 终端 3：看板
+streamlit run app/dashboard.py
+```
 
 ---
 
@@ -229,63 +221,61 @@ python kafka/stream_processor.py
 
 ```
 ai-data-warehouse/
+│
+├── config.py                        # 集中配置（从 .env 读取）
+├── .env.example                     # 配置模板
+│
+├── utils/
+│   ├── logger.py                    # 结构化日志
+│   └── retry.py                     # 重试装饰器（tenacity）
+│
+├── kafka/
+│   └── producer.py                  # 实时订单/支付模拟生产者
+│
+├── flink/
+│   └── flink_stream_job.py          # Flink 流处理作业
+│                                    # （PyFlink Table API，自动降级为 Python 模拟）
+│
 ├── clickhouse/
 │   └── init/
-│       ├── 01_init_tables.sql      # 历史数仓建表
-│       └── 02_kafka_stream.sql     # 流式表结构
-├── pipelines/
-│   ├── etl_ods.py                  # ODS 层加载
-│   ├── etl_dwd.py                  # DWD 层加工
-│   ├── etl_dws_ads.py              # DWS/ADS 层聚合
-│   ├── verify.py                   # 四层验收
-│   └── dag_daily_pipeline.py       # Airflow DAG
-├── knowledge_base/
-│   ├── 01_data_dict.md             # 数据字典
-│   ├── 02_metrics.md               # 指标口径
-│   └── 03_business_rules.md        # 业务规则
+│       ├── 01_init_tables.sql       # 创建数据库
+│       ├── 02_kafka_stream.sql      # Kafka Engine + ODS 落地表 + 物化视图
+│       └── 03_flink_realtime.sql    # Flink 输出表 + 实时 ADS 视图
+│
 ├── ai_layer/
-│   ├── nl2sql.py                   # 自然语言转SQL
-│   ├── rag_engine.py               # RAG 知识库
-│   ├── agent_tools.py              # Agent 工具集
-│   └── agents.py                   # 三个专用 Agent
-├── kafka/
-│   ├── producer.py                 # 实时订单生产者
-│   ├── stream_processor.py         # AI 流处理器
-│   └── dag_realtime_stream.py      # 实时调度 DAG
+│   ├── tools.py                     # Agent 工具（唯一定义来源）
+│   ├── nl2sql.py                    # NL2SQL（实时表路由，Schema TTL缓存）
+│   ├── rag_engine.py                # RAG 知识库
+│   └── agents.py                    # 三个实时分析 Agent
+│
 ├── app/
-│   ├── dashboard.py                # v1：NL2SQL
-│   ├── dashboard_v2.py             # v2：+RAG
-│   ├── dashboard_v3.py             # v3：+Agent
-│   └── realtime_dashboard.py       # 实时监控看板
-├── reports/                        # Agent 生成的分析报告
-├── docker-compose.yml              # 一键启动
-└── requirements.txt                # Python 依赖
+│   └── dashboard.py                 # Streamlit 实时看板（监控+查询+Agent）
+│
+├── knowledge_base/
+│   ├── 01_data_dict.md              # 数据字典
+│   ├── 02_metrics.md                # 指标口径
+│   └── 03_business_rules.md         # 业务规则
+│
+├── reports/                         # Agent 生成的分析报告
+│
+├── docker-compose.yml               # 一键启动（Kafka + Flink + ClickHouse + 看板）
+├── Dockerfile.producer              # 生产者 & Flink 作业镜像
+├── Dockerfile.dashboard             # 看板镜像
+└── requirements.txt
 ```
-
----
-
-## 数据集
-
-使用 [Kaggle Olist 巴西电商数据集](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)，包含 2016-2018 年真实交易数据：
-
-| 文件 | 描述 | 行数 |
-|------|------|------|
-| olist_orders_dataset.csv | 订单主表 | 99,441 |
-| olist_order_items_dataset.csv | 订单商品明细 | 112,650 |
-| olist_customers_dataset.csv | 用户信息 | 99,441 |
-| olist_products_dataset.csv | 商品信息 | 32,951 |
 
 ---
 
 ## 技术亮点
 
-1. **Tool Calling 解决 LLM 兼容性问题**：ReAct 框架与 DeepSeek 输出格式不匹配导致死循环，改用 Function Calling JSON 协议彻底解决
-2. **Agent 自主纠错能力**：SQL 中文别名报错后 Agent 自动换英文别名重试，无需人工干预
-3. **规则+AI 双重检测**：流处理中正常情况0次LLM调用，规则触发异常后才调 AI，节省99%+推理成本
-4. **批流一体架构**：历史数据和实时数据共用同一套表结构，NL2SQL 透明访问两套数据
+**Flink 替代 Python 轮询**
+原有 `stream_processor.py` 用 `time.sleep()` 模拟分钟窗口，存在时钟漂移、无容错、单线程瓶颈问题。Flink 提供精确的 Processing Time 滚动窗口、Exactly-Once Checkpoint 语义和自动背压。无 PyFlink 环境时自动降级为 Python 模拟模式，功能等价。
 
----
+**批流一体 NL2SQL → 纯实时 NL2SQL**
+移除所有历史批量表描述，System Prompt 内置实时查询路由规则（"今天"→ `today()`，"最近N分钟"→ `INTERVAL`），`ads.*` 视图封装 `today()` 过滤，LLM 生成的 SQL 更简洁、出错率更低。
 
-## License
+**规则 + AI 双层异常检测**
+Flink 作业内嵌规则引擎（取消率 > 15%、价格 > R$3000 等）毫秒级响应，无需 LLM。仅规则触发时才调用 DeepSeek 生成原因分析，节省 99%+ 推理成本，同时保留 AI 分析能力。
 
-MIT License - 详见 [LICENSE](LICENSE) 文件
+**统一工具来源**
+所有 Agent 工具定义集中于 `ai_layer/tools.py`，消除原来 `agents.py` 与 `agent_tools.py` 重复定义、行为不一致问题。`detect_realtime_anomaly` 工具取代通用的 `calculate_anomalies`，专为实时分钟级数据优化。

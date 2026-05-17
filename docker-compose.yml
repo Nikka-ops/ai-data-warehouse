@@ -1,12 +1,16 @@
 version: "3.8"
 
-# ── 共享环境变量 ───────────────────────────────────────────────
 x-common-env: &common-env
   CLICKHOUSE_HOST: clickhouse
   CLICKHOUSE_PORT: "8123"
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
   KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  KAFKA_ORDERS_TOPIC: orders_stream
+  KAFKA_PAYMENTS_TOPIC: payments_stream
+  KAFKA_FLINK_STATS_TOPIC: flink.minute_stats
+  KAFKA_FLINK_DWD_TOPIC: flink.realtime_dwd
+  KAFKA_FLINK_ALERTS_TOPIC: flink.alerts
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
@@ -43,7 +47,6 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 24
-      KAFKA_LOG_SEGMENT_BYTES: 104857600
     healthcheck:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 15s
@@ -86,6 +89,20 @@ services:
       timeout: 5s
       retries: 5
 
+  # ─── Kafka 生产者（模拟实时订单流）──────────────────────
+  kafka-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: ai_dw_producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python kafka/producer.py --mode normal --rate 10
+    restart: on-failure
+
   # ─── Flink JobManager ─────────────────────────────────────
   flink-jobmanager:
     image: flink:1.18-scala_2.12
@@ -97,20 +114,18 @@ services:
       clickhouse:
         condition: service_healthy
     ports:
-      - "8081:8081"    # Flink Web UI
+      - "8081:8081"
     environment:
       <<: *common-env
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 4
         parallelism.default: 2
-        state.backend: filesystem
         state.checkpoints.dir: file:///flink-checkpoints
         execution.checkpointing.interval: 60s
     volumes:
       - flink_checkpoints:/flink-checkpoints
-      - ./flink:/opt/flink/jobs            # 挂载作业代码
-      - .:/opt/flink/project               # 挂载整个项目（含 config.py）
+      - .:/opt/flink/project
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/overview"]
       interval: 15s
@@ -130,85 +145,27 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 4
-        parallelism.default: 2
     volumes:
       - flink_checkpoints:/flink-checkpoints
-      - ./flink:/opt/flink/jobs
       - .:/opt/flink/project
 
-  # ─── Flink Python 作业提交器 ─────────────────────────────
-  flink-job-submitter:
-    image: flink:1.18-scala_2.12
-    container_name: ai_dw_flink_submit
-    depends_on:
-      flink-jobmanager:
-        condition: service_healthy
-    command: >
-      bash -c "
-        pip install apache-flink kafka-python clickhouse-connect openai python-dotenv --quiet &&
-        cd /opt/flink/project &&
-        python flink/flink_stream_job.py --mode python
-      "
-    environment:
-      <<: *common-env
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_ORDERS_TOPIC: orders_stream
-      KAFKA_PAYMENTS_TOPIC: payments_stream
-      KAFKA_FLINK_STATS_TOPIC: flink.minute_stats
-      KAFKA_FLINK_DWD_TOPIC: flink.realtime_dwd
-      KAFKA_FLINK_ALERTS_TOPIC: flink.alerts
-    volumes:
-      - .:/opt/flink/project
-    restart: on-failure
-
-  # ─── Kafka 生产者（模拟实时订单）────────────────────────
-  kafka-producer:
+  # ─── Flink 作业（Python 模拟模式，无需 Java 编译）────────
+  flink-job:
     build:
       context: .
       dockerfile: Dockerfile.producer
-    container_name: ai_dw_producer
+    container_name: ai_dw_flink_job
     depends_on:
       kafka:
         condition: service_healthy
-    environment:
-      <<: *common-env
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-    command: python kafka/producer.py --mode normal --rate 10
-    restart: on-failure
-
-  # ─── Airflow ───────────────────────────────────────────────
-  airflow:
-    image: apache/airflow:2.8.1-python3.11
-    container_name: ai_dw_airflow
-    depends_on:
       clickhouse:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
-    ports:
-      - "8080:8080"
-    volumes:
-      - airflow_logs:/opt/airflow/logs
-      - ./pipelines:/opt/airflow/dags
-      - .:/opt/airflow/project
     environment:
       <<: *common-env
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
-      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-ai-dw-secret-change-me}
-      _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER:-admin}
-      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-admin123}
-    command: >
-      bash -c "
-        pip install clickhouse-connect kafka-python tenacity apscheduler python-dotenv --quiet &&
-        airflow db init &&
-        airflow users create --username ${AIRFLOW_USER:-admin} --password ${AIRFLOW_PASSWORD:-admin123}
-          --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
-        airflow webserver --port 8080 &
-        airflow scheduler
-      "
+    command: python flink/flink_stream_job.py --mode python
+    restart: on-failure
+    volumes:
+      - .:/app
 
   # ─── Streamlit 看板 ───────────────────────────────────────
   dashboard:
@@ -231,4 +188,3 @@ services:
 volumes:
   clickhouse_data:
   flink_checkpoints:
-  airflow_logs:
