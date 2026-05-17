@@ -1,159 +1,113 @@
-"""
-ETL 脚本：将 Kaggle CSV 数据加载到 ClickHouse ODS 层
-支持批量写入，有进度提示
-"""
-
-import os
+# -*- coding: utf-8 -*-
+"""ETL：CSV 数据 → ClickHouse ODS 层（幂等，ReplacingMergeTree去重）"""
+import os, sys
 import pandas as pd
 import clickhouse_connect
 from datetime import datetime
 
-# ── 配置 ──────────────────────────────────────────────────────
-CH_HOST     = os.getenv('CLICKHOUSE_HOST', 'localhost')
-CH_PORT     = int(os.getenv('CLICKHOUSE_PORT', '8123'))
-CH_USER     = os.getenv('CLICKHOUSE_USER', 'admin')
-CH_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', 'admin123')
-DATA_DIR    = os.path.join(os.path.dirname(__file__), '..', 'data', 'raw')
-BATCH_SIZE  = 10_000
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import cfg
+from utils.logger import get_logger
+from utils.retry import ch_retry
+
+log = get_logger('etl_ods')
 
 
+@ch_retry
 def get_client():
     return clickhouse_connect.get_client(
-        host=CH_HOST, port=CH_PORT,
-        username=CH_USER, password=CH_PASSWORD
+        host=cfg.ch_host, port=cfg.ch_port,
+        username=cfg.ch_user, password=cfg.ch_password,
     )
 
 
-# ── 数据加载函数 ───────────────────────────────────────────────
+def _batch_insert(client, table: str, df: pd.DataFrame):
+    total = len(df)
+    for i in range(0, total, cfg.etl_batch_size):
+        batch = df.iloc[i:i + cfg.etl_batch_size]
+        client.insert_df(table, batch)
+        pct = min(100, int((i + cfg.etl_batch_size) / total * 100))
+        log.info('  写入进度：%d%% (%d/%d)', pct, min(i + cfg.etl_batch_size, total), total)
 
-def load_orders(client):
-    """加载订单表到 ods.orders_raw"""
-    print("\n📦 加载订单表...")
-    path = os.path.join(DATA_DIR, 'olist_orders_dataset.csv')
-    df = pd.read_csv(path)
 
-    # 字段重命名
-    df = df.rename(columns={
-        'order_id':                          'order_id',
-        'customer_id':                       'customer_id',
-        'order_status':                      'order_status',
-        'order_purchase_timestamp':          'order_purchase_ts',
-        'order_approved_at':                 'order_approved_ts',
-        'order_delivered_customer_date':     'order_delivered_ts',
-        'order_estimated_delivery_date':     'order_estimated_ts',
+def _deduplicate(client, table: str):
+    """触发 ReplacingMergeTree 去重合并，保证幂等性"""
+    log.info('  触发 %s 去重合并...', table)
+    client.command(f'OPTIMIZE TABLE {table} FINAL')
+
+
+def load_orders(client) -> int:
+    log.info('加载订单表...')
+    path = os.path.join(cfg.data_dir, 'olist_orders_dataset.csv')
+    df = pd.read_csv(path).rename(columns={
+        'order_purchase_timestamp':       'order_purchase_ts',
+        'order_approved_at':              'order_approved_ts',
+        'order_delivered_customer_date':  'order_delivered_ts',
+        'order_estimated_delivery_date':  'order_estimated_ts',
     })
-
-    # 时间字段处理
-    for col in ['order_purchase_ts', 'order_approved_ts',
-                'order_delivered_ts', 'order_estimated_ts']:
+    for col in ['order_purchase_ts', 'order_approved_ts', 'order_delivered_ts', 'order_estimated_ts']:
         df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    # 必须有 order_purchase_ts
+    before = df.shape[0]
     df = df.dropna(subset=['order_purchase_ts'])
-    df['_load_time'] = datetime.now()
+    dropped = before - df.shape[0]
+    if dropped:
+        log.warning('丢弃 %d 行（order_purchase_ts 为空）', dropped)
 
+    df['_load_time'] = datetime.now()
     cols = ['order_id', 'customer_id', 'order_status',
             'order_purchase_ts', 'order_approved_ts',
             'order_delivered_ts', 'order_estimated_ts', '_load_time']
-    df = df[cols]
-
-    _batch_insert(client, 'ods.orders_raw', df)
-    print(f"  ✅ 订单表加载完成，共 {len(df):,} 行")
+    _batch_insert(client, 'ods.orders_raw', df[cols])
+    _deduplicate(client, 'ods.orders_raw')
+    log.info('订单表完成，共 %d 行', len(df))
     return len(df)
 
 
-def load_order_items(client):
-    """加载订单商品表到 ods.order_items_raw"""
-    print("\n🛒 加载订单商品表...")
-    path = os.path.join(DATA_DIR, 'olist_order_items_dataset.csv')
-    df = pd.read_csv(path)
-
-    df = df.rename(columns={
-        'order_id':             'order_id',
-        'order_item_id':        'order_item_id',
-        'product_id':           'product_id',
-        'seller_id':            'seller_id',
-        'price':                'price',
-        'freight_value':        'freight_value',
-        'shipping_limit_date':  'shipping_limit_ts',
-    })
-
+def load_order_items(client) -> int:
+    log.info('加载订单商品表...')
+    path = os.path.join(cfg.data_dir, 'olist_order_items_dataset.csv')
+    df = pd.read_csv(path).rename(columns={'shipping_limit_date': 'shipping_limit_ts'})
     df['shipping_limit_ts'] = pd.to_datetime(df['shipping_limit_ts'], errors='coerce')
     df['_load_time'] = datetime.now()
-
     cols = ['order_id', 'order_item_id', 'product_id', 'seller_id',
             'price', 'freight_value', 'shipping_limit_ts', '_load_time']
-    df = df[cols]
-
-    _batch_insert(client, 'ods.order_items_raw', df)
-    print(f"  ✅ 订单商品表加载完成，共 {len(df):,} 行")
+    _batch_insert(client, 'ods.order_items_raw', df[cols])
+    _deduplicate(client, 'ods.order_items_raw')
+    log.info('订单商品表完成，共 %d 行', len(df))
     return len(df)
 
 
-def load_customers(client):
-    """加载客户表到 ods.customers_raw"""
-    print("\n👤 加载客户表...")
-    path = os.path.join(DATA_DIR, 'olist_customers_dataset.csv')
-    df = pd.read_csv(path)
-
-    df = df.rename(columns={
-        'customer_id':          'customer_id',
-        'customer_unique_id':   'customer_unique_id',
-        'customer_city':        'city',
-        'customer_state':       'state',
+def load_customers(client) -> int:
+    log.info('加载客户表...')
+    path = os.path.join(cfg.data_dir, 'olist_customers_dataset.csv')
+    df = pd.read_csv(path).rename(columns={
+        'customer_city':  'city',
+        'customer_state': 'state',
     })
-
     df['_load_time'] = datetime.now()
-    df = df[['customer_id', 'customer_unique_id', 'city', 'state', '_load_time']]
-
-    _batch_insert(client, 'ods.customers_raw', df)
-    print(f"  ✅ 客户表加载完成，共 {len(df):,} 行")
+    cols = ['customer_id', 'customer_unique_id', 'city', 'state', '_load_time']
+    _batch_insert(client, 'ods.customers_raw', df[cols])
+    _deduplicate(client, 'ods.customers_raw')
+    log.info('客户表完成，共 %d 行', len(df))
     return len(df)
 
 
-def load_products(client):
-    """加载商品表到 ods.products_raw"""
-    print("\n📦 加载商品表...")
-    path = os.path.join(DATA_DIR, 'olist_products_dataset.csv')
-    df = pd.read_csv(path)
-
-    df = df.rename(columns={
-        'product_id':               'product_id',
-        'product_category_name':    'product_category_name',
-        'product_weight_g':         'product_weight_g',
-        'product_length_cm':        'product_length_cm',
-        'product_height_cm':        'product_height_cm',
-        'product_width_cm':         'product_width_cm',
-    })
-
+def load_products(client) -> int:
+    log.info('加载商品表...')
+    path = os.path.join(cfg.data_dir, 'olist_products_dataset.csv')
+    df = pd.read_csv(path).rename(columns={'product_category_name': 'product_category_name'})
     df['product_category_name'] = df['product_category_name'].fillna('unknown')
     df['_load_time'] = datetime.now()
-
     cols = ['product_id', 'product_category_name', 'product_weight_g',
             'product_length_cm', 'product_height_cm', 'product_width_cm', '_load_time']
-    df = df[cols]
-
-    _batch_insert(client, 'ods.products_raw', df)
-    print(f"  ✅ 商品表加载完成，共 {len(df):,} 行")
+    _batch_insert(client, 'ods.products_raw', df[cols])
+    _deduplicate(client, 'ods.products_raw')
+    log.info('商品表完成，共 %d 行', len(df))
     return len(df)
-
-
-# ── 工具函数 ──────────────────────────────────────────────────
-
-def _batch_insert(client, table: str, df: pd.DataFrame):
-    """分批写入 ClickHouse，避免内存溢出"""
-    total = len(df)
-    for i in range(0, total, BATCH_SIZE):
-        batch = df.iloc[i:i + BATCH_SIZE]
-        client.insert_df(table, batch)
-        pct = min(100, int((i + BATCH_SIZE) / total * 100))
-        print(f"  ⏳ 写入进度：{pct}% ({min(i+BATCH_SIZE, total):,}/{total:,})", end='\r')
-    print()
 
 
 def verify_counts(client):
-    """验证各表数据量"""
-    print("\n📊 数据验证：")
     tables = [
         ('ods.orders_raw',      '订单表'),
         ('ods.order_items_raw', '订单商品表'),
@@ -162,20 +116,14 @@ def verify_counts(client):
     ]
     for table, name in tables:
         cnt = client.query(f'SELECT count() FROM {table}').first_row[0]
-        print(f"  {name:10s} → {cnt:>10,} 行")
+        log.info('  %s → %d 行', name, cnt)
 
-
-# ── 主入口 ────────────────────────────────────────────────────
 
 def run_ods_load():
-    """执行 ODS 层全量加载"""
-    print("=" * 55)
-    print("  AI 数仓 - ODS 层数据加载")
-    print(f"  时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 55)
-
+    log.info('========== ODS 层数据加载开始 ==========')
+    start = datetime.now()
     client = get_client()
-    print(f"✅ ClickHouse 连接成功 ({CH_HOST}:{CH_PORT})")
+    log.info('ClickHouse 连接成功 (%s:%d)', cfg.ch_host, cfg.ch_port)
 
     load_orders(client)
     load_order_items(client)
@@ -183,7 +131,8 @@ def run_ods_load():
     load_products(client)
 
     verify_counts(client)
-    print("\n🎉 ODS 层加载完成！")
+    elapsed = (datetime.now() - start).total_seconds()
+    log.info('========== ODS 层加载完成（耗时 %.1f 秒）==========', elapsed)
 
 
 if __name__ == '__main__':

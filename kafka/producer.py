@@ -15,11 +15,16 @@ import argparse
 from datetime import datetime, timedelta
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
+import os, sys
+
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from config import cfg
 
 # ── 模拟数据配置 ──────────────────────────────────────────────
-KAFKA_BOOTSTRAP = 'localhost:9092'
-ORDERS_TOPIC    = 'orders_stream'
-PAYMENTS_TOPIC  = 'payments_stream'
+KAFKA_BOOTSTRAP = cfg.kafka_bootstrap
+ORDERS_TOPIC    = cfg.orders_topic
+PAYMENTS_TOPIC  = cfg.payments_topic
 
 # 巴西各州权重（SP 占比最高，和真实数据一致）
 STATES = {
