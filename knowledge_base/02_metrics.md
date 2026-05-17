@@ -1,115 +1,261 @@
-# 指标口径手册
+# 实时指标口径手册
 
 ## 核心交易指标
 
 ### GMV（Gross Merchandise Volume，商品成交总额）
 
 **定义：** 所有订单的商品价格之和，不含运费，不扣除退款。
-**计算公式：** GMV = SUM(price)，其中 price 来自 dwd.order_detail 或 dws 层的 gmv 字段。
+**计算公式：** GMV = SUM(price)，price 来自 ods.orders_stream 或 dwd.realtime_order_detail。
 **注意事项：**
-- GMV 包含已取消订单，反映平台总交易规模
-- GMV 不等于实际收入，实际收入需扣除退款、佣金等
+- GMV 包含所有状态订单（含取消），反映平台总交易规模
+- GMV 不等于实际收入，实际收入需过滤 order_status = 'delivered'
 - 运费（freight_value）不计入 GMV
-- 本数仓 GMV 单位为巴西雷亚尔（R$）
+- payment_value（支付流中的字段）含运费，不能替代 GMV 使用
+- 单位：巴西雷亚尔（R$）
 
-**示例 SQL：**
+**实时查询示例：**
 ```sql
-SELECT sum(price) AS gmv FROM dwd.order_detail
+-- 最近10分钟 GMV
+SELECT sum(price) AS gmv
+FROM ods.orders_stream
+WHERE event_time >= now() - INTERVAL 10 MINUTE
+
+-- 今日分钟级 GMV 趋势（推荐，已预计算）
+SELECT window_start, total_gmv
+FROM dws.realtime_minute_stats
+WHERE window_start >= today()
+ORDER BY window_start
+
+-- 今日 GMV 汇总（最简）
+SELECT sum(gmv) AS today_gmv
+FROM ads.realtime_hourly
 ```
 
 ---
 
-### 销售额 vs GMV 的区别
+### 实时 GMV vs 支付金额的区别
 
-- **GMV**：包含所有状态的订单（含取消、退款），反映平台交易规模
-- **实际销售额**：只计算 delivered（已送达）订单，反映真实成交
-- 在本数仓中，dws/ads 层的 gmv 字段 = 所有状态订单的 price 之和（即 GMV 口径）
-- 若需要"实际销售额"，需过滤 order_status = 'delivered'
+| 字段 | 来源表 | 含义 | 是否含运费 |
+|------|--------|------|-----------|
+| price | ods.orders_stream | 商品售价 | 否 |
+| freight_value | ods.orders_stream | 运费 | — |
+| total_amount | dwd.realtime_order_detail | price + freight_value | 是 |
+| payment_value | ods.payments_stream | 用户实际支付金额 | 是 |
+| total_gmv | dws.realtime_minute_stats | 分钟内 sum(price) | 否 |
+| gmv | ads.realtime_hourly | 小时内 sum(price) | 否 |
+
+**结论：** 计算 GMV 统一使用 sum(price)；计算用户实际支付用 sum(payment_value)。
 
 ---
 
 ### 客单价（Average Order Value，AOV）
 
 **定义：** 平均每笔订单的商品金额。
-**计算公式：** 客单价 = GMV / 订单数 = SUM(price) / COUNT(DISTINCT order_id)
-**在数仓中：** dws.order_daily 和 ads.monthly_kpi 中的 avg_order_value 字段已预计算。
-**本数据集客单价：** 约 R$ 132.71（约合人民币 180 元）
+**计算公式：** 客单价 = SUM(price) / COUNT(DISTINCT order_id)
+**在数仓中：** dws.realtime_minute_stats.avg_price 为分钟内平均价格；ads.realtime_hourly.avg_price 为小时内平均价格。
 
----
-
-### 订单数 vs 商品件数
-
-- **订单数（order_cnt）：** 按 order_id 去重计数，一个订单可包含多件商品
-- **商品件数（item_cnt）：** 订单商品明细行数，不去重
-- 两者关系：item_cnt >= order_cnt，差值为多件商品订单的额外件数
-- 本数据集：订单数 98,666，商品件数 112,650，平均每单 1.14 件
-
----
-
-### 用户数 vs 客户数
-
-- **customer_id：** 每笔订单生成一个，同一用户多次购买有多个 customer_id
-- **customer_unique_id：** 真实用户唯一标识，计算 UV（独立用户数）时必须用此字段
-- **用户数（user_cnt）：** COUNT(DISTINCT customer_unique_id)
-- 本数据集：订单数 98,666，独立用户数 97,729，说明绝大多数用户只买过一次（复购率极低）
-
----
-
-### 环比增长率（Month-over-Month，MoM）
-
-**定义：** 本月指标相比上月的增长幅度。
-**计算公式：** MoM = (本月值 - 上月值) / 上月值 × 100%
-**在数仓中：** ads.monthly_kpi 表中的 mom_gmv_rate 字段，单位为百分比（%）
-**示例：** mom_gmv_rate = 27.71 表示本月GMV比上月增长了 27.71%
-
----
-
-### 同比增长率（Year-over-Year，YoY）
-
-**定义：** 本月指标相比去年同月的增长幅度。
-**注意：** 本数仓 ADS 层未预计算同比，需要在查询时自行计算：
+**实时查询示例：**
 ```sql
--- 计算同比示例
-SELECT
-    a.ym,
-    a.gmv AS 本月GMV,
-    b.gmv AS 去年同月GMV,
-    round((a.gmv - b.gmv) / b.gmv * 100, 2) AS yoy_rate
-FROM ads.monthly_kpi a
-LEFT JOIN ads.monthly_kpi b
-    ON substring(a.ym, 6, 2) = substring(b.ym, 6, 2)  -- 月份相同
-    AND toInt32(substring(a.ym, 1, 4)) = toInt32(substring(b.ym, 1, 4)) + 1  -- 年份差1
+-- 最近1小时平均客单价
+SELECT avg(price) AS aov
+FROM ods.orders_stream
+WHERE event_time >= now() - INTERVAL 1 HOUR
+
+-- 今日各小时平均客单价趋势
+SELECT hour_start, avg_price FROM ads.realtime_hourly ORDER BY hour_start
 ```
 
 ---
 
-### 配送时效（Delivery Days）
+### 独立客户数（Unique Customers）
 
-**定义：** 从客户下单到实际收货的自然日数。
-**计算公式：** delivery_days = dateDiff('day', order_purchase_ts, order_delivered_ts)
-**在数仓中：** dwd.order_detail 表的 delivery_days 字段（仅 delivered 状态订单有值）
-**本数据集平均配送时效：** 约 12 天（巴西地域广阔，配送时间较长）
+**定义：** 去重后的下单客户数，衡量实时活跃买家规模。
+**计算公式：** COUNT(DISTINCT customer_id)
+**在数仓中：** dws.realtime_minute_stats.unique_customers 为分钟内去重客户数；ads.realtime_hourly.unique_customers 为小时内去重客户数。
+
+**注意：** customer_id 在本实时系统中为每笔订单分配的唯一客户标识（格式 C{5位数字}），可直接用于去重计算活跃买家数。
 
 ---
 
-## 运营分析指标
+### 订单量（Order Count）
+
+**在数仓中：**
+- dws.realtime_minute_stats.order_cnt：分钟级订单数
+- ads.realtime_hourly.order_cnt：小时级订单数
+- ads.realtime_category_today.order_cnt：今日各品类订单数
+
+**实时查询示例：**
+```sql
+-- 最近5分钟每分钟订单量
+SELECT window_start, order_cnt
+FROM dws.realtime_minute_stats
+WHERE window_start >= now() - INTERVAL 5 MINUTE
+ORDER BY window_start
+
+-- 今日各小时订单量
+SELECT hour_start, order_cnt FROM ads.realtime_hourly ORDER BY hour_start
+```
+
+---
+
+## 实时运营指标
+
+### 分钟吞吐量（Throughput）
+
+**定义：** 每分钟处理的订单数，衡量实时流量强度。
+**来源：** dws.realtime_minute_stats.order_cnt
+**异常阈值：** 当某分钟 order_cnt 偏离近期均值 ±2σ 时，Flink 触发 ANOMALY 告警。
+
+**实时查询示例：**
+```sql
+-- 最近30分钟吞吐量趋势
+SELECT window_start, order_cnt, total_gmv
+FROM dws.realtime_minute_stats
+WHERE window_start >= now() - INTERVAL 30 MINUTE
+ORDER BY window_start
+```
+
+---
 
 ### 取消率（Cancellation Rate）
 
-**计算公式：** 取消率 = 取消订单数 / 总订单数 × 100%
-**本数据集取消率：** 542 / 98,666 ≈ 0.55%，取消率极低
+**定义：** 取消订单数占总订单数的百分比，衡量平台订单质量。
+**计算公式：** 取消率 = COUNT(order_status='canceled') / COUNT(*) × 100%
+**告警阈值：** Flink 规则引擎：当前分钟取消率 > 15% 触发 QUALITY 级别告警。
+
+**实时查询示例：**
+```sql
+-- 今日各小时取消率
+SELECT
+    hour_start,
+    order_cnt,
+    cancel_cnt,
+    round(cancel_cnt / order_cnt * 100, 2) AS cancel_rate_pct
+FROM ads.realtime_hourly
+ORDER BY hour_start
+
+-- 最近10分钟取消率
+SELECT
+    countIf(order_status = 'canceled') AS cancel_cnt,
+    count() AS total_cnt,
+    round(countIf(order_status = 'canceled') / count() * 100, 2) AS cancel_rate_pct
+FROM ods.orders_stream
+WHERE event_time >= now() - INTERVAL 10 MINUTE
+```
 
 ---
 
-### 送达率（Delivery Rate）
+### 支付方式分布（Payment Type Distribution）
 
-**计算公式：** 送达率 = 已送达订单数 / 总订单数 × 100%
-**本数据集送达率：** 97.8%，物流体系成熟
+**定义：** 各支付方式的订单数和支付金额占比。
+**字段：** ods.payments_stream.payment_type / dwd.realtime_order_detail.payment_type
+
+**支付方式枚举值：**
+- `credit_card`：信用卡（最常见）
+- `boleto`：巴西银行转账单（boleto bancário）
+- `voucher`：代金券
+- `debit_card`：借记卡
+
+**实时查询示例：**
+```sql
+-- 今日支付方式分布
+SELECT
+    payment_type,
+    count() AS order_cnt,
+    sum(payment_value) AS total_paid
+FROM ods.payments_stream
+WHERE event_time >= today()
+GROUP BY payment_type
+ORDER BY order_cnt DESC
+```
 
 ---
 
-### 复购率（Repurchase Rate）
+### 分期付款分析（Installments）
 
-**定义：** 购买过2次及以上的用户占总用户数的比例。
-**本数据集：** 订单数(98,666) ≈ 用户数(97,729)，说明复购率接近0，几乎每个用户只买过一次。
-**分析：** 这是新兴电商平台的典型特征，用户获取快但留存差，需要重点投入复购运营。
+**字段：** ods.payments_stream.installments（UInt8，1=不分期，最多12期）
+**业务含义：** installments > 1 表示分期付款，巴西电商分期付款比例较高。
+
+**实时查询示例：**
+```sql
+-- 今日分期 vs 全款比例
+SELECT
+    if(installments = 1, '全款', '分期') AS payment_mode,
+    count() AS cnt
+FROM ods.payments_stream
+WHERE event_time >= today()
+GROUP BY payment_mode
+```
+
+---
+
+### 异常告警指标
+
+**来源：** stream.ai_quality_alerts
+**核心字段：**
+- metric_value：实际指标值
+- threshold_value：告警阈值
+- severity：HIGH / MEDIUM / LOW
+- alert_type：ANOMALY（流量异常）/ QUALITY（数据质量）
+
+**Flink 内置告警规则：**
+
+| 规则 | 触发条件 | 告警类型 | 严重级别 |
+|------|---------|---------|---------|
+| 订单量异常 | order_cnt 偏离均值 ±2σ | ANOMALY | HIGH |
+| 高价格告警 | 单笔订单 price > R$3000 | QUALITY | MEDIUM |
+| 高取消率 | 分钟取消率 > 15% | QUALITY | HIGH |
+
+**查询示例：**
+```sql
+-- 最近1小时告警
+SELECT alert_time, alert_type, severity, detail, ai_suggestion
+FROM stream.ai_quality_alerts
+WHERE alert_time >= now() - INTERVAL 1 HOUR
+ORDER BY alert_time DESC
+
+-- 今日 HIGH 级别告警数
+SELECT count() AS high_alert_cnt
+FROM stream.ai_quality_alerts
+WHERE alert_time >= today() AND severity = 'HIGH'
+```
+
+---
+
+## 品类与地域指标
+
+### 今日品类 GMV 排行
+
+**来源：** ads.realtime_category_today（内置 today() 过滤，直接查询）
+
+```sql
+SELECT product_category, order_cnt, gmv, avg_price
+FROM ads.realtime_category_today
+ORDER BY gmv DESC
+LIMIT 10
+```
+
+### 今日各州销售排行
+
+**来源：** ads.realtime_state_today（内置 today() 过滤，含 rank_by_gmv 排名字段）
+
+```sql
+SELECT state, order_cnt, gmv, rank_by_gmv
+FROM ads.realtime_state_today
+ORDER BY rank_by_gmv
+LIMIT 10
+```
+
+---
+
+## 数据新鲜度说明
+
+| 数据层 | 数据延迟 | 说明 |
+|--------|---------|------|
+| ods.* | < 5 秒 | Kafka Engine 实时消费 |
+| dwd.realtime_order_detail | < 1 分钟 | Flink Processing Time JOIN |
+| dws.realtime_minute_stats | 1 分钟 | Flink 1分钟滚动窗口 |
+| ads.* 视图 | < 1 分钟 | 基于 dwd 层实时视图 |
+| stream.ai_quality_alerts | 1 分钟 | Flink 窗口结束后写入 |
+
+**查询建议：** 需要最新数据优先查 ods 层；需要稳定聚合数据查 ads 视图或 dws 层。
