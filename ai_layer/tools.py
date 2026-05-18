@@ -170,4 +170,47 @@ def save_report(title: str, content: str) -> str:
         return f'保存失败：{e}'
 
 
-ALL_TOOLS = [query_data, query_knowledge, detect_realtime_anomaly, generate_insight, save_report]
+@tool
+def get_etl_status(lookback_hours: int = 1) -> str:
+    """
+    查询 AI ETL Agent 的最新运行状态和审计日志。
+    - lookback_hours: 查询最近 N 小时的审计记录（默认1小时）
+    返回：每轮运行的质量分、修复记录数、新生成规则数、状态。
+    """
+    try:
+        ch = _get_ch()
+        logs = ch.query_df(f"""
+            SELECT run_time, quality_score, records_scanned, issues_found,
+                   records_fixed, new_rules_count, status, summary
+            FROM stream.etl_audit_log
+            WHERE run_time >= now() - INTERVAL {lookback_hours} HOUR
+            ORDER BY run_time DESC
+            LIMIT 20
+        """)
+        rules = ch.query_df("""
+            SELECT rule_name, rule_type, field_name, hit_count, enabled, ai_reason
+            FROM stream.etl_rules
+            ORDER BY hit_count DESC, created_at DESC
+            LIMIT 20
+        """)
+
+        result = f"## AI ETL 最近 {lookback_hours} 小时运行记录\n\n"
+        if logs.empty:
+            result += "暂无运行记录（Agent 可能尚未启动）\n"
+        else:
+            result += logs.to_markdown(index=False) + "\n\n"
+
+        result += "## 已生成的清洗规则\n\n"
+        if rules.empty:
+            result += "暂无规则（数据质量正常或 Agent 尚未运行）\n"
+        else:
+            result += rules.to_markdown(index=False)
+
+        return result
+    except Exception as e:
+        log.error('[get_etl_status] 失败：%s', e)
+        return f'查询 ETL 状态失败：{e}'
+
+
+ALL_TOOLS = [query_data, query_knowledge, detect_realtime_anomaly,
+             generate_insight, save_report, get_etl_status]
