@@ -208,84 +208,211 @@ if page == "实时监控":
 
 
 # ══════════════════════════════════════════════════════════════
-# 页面 2：智能查询（NL2SQL）
+# 页面 2：智能查询（多轮对话 NL2SQL + RAG）
 # ══════════════════════════════════════════════════════════════
 elif page == "智能查询":
     st.title("💬 智能查询")
-    st.caption("用自然语言查询实时数据 · 数据来自 Kafka 实时流")
+    st.caption("支持多轮对话 · 自动路由 NL2SQL / 知识库问答 · 数据来自 Kafka 实时流")
 
-    # 示例问题
-    examples = [
-        "最近10分钟每分钟订单量和GMV趋势",
-        "今日各品类销售额排行",
-        "今日各州订单量 Top 10",
-        "最近1小时平均价格走势",
-        "当前有哪些异常告警？",
-        "最近30分钟哪个品类最热销？",
-        "今日支付方式分布（credit_card/boleto等）",
-        "最近5分钟取消率是多少？",
-    ]
+    # ── 初始化 session state ──────────────────────────────────
+    if 'chat_messages' not in st.session_state:
+        st.session_state['chat_messages'] = []   # 展示用消息列表
+    if 'nl2sql_history' not in st.session_state:
+        st.session_state['nl2sql_history'] = []  # NL2SQL 历史（含 sql/result_summary）
+    if 'rag_history' not in st.session_state:
+        st.session_state['rag_history'] = []     # RAG 历史（含 question/answer）
 
-    st.markdown("**示例问题（点击填入）**")
-    cols = st.columns(4)
-    for i, ex in enumerate(examples):
-        if cols[i % 4].button(ex, key=f"ex_{i}", use_container_width=True):
-            st.session_state['nl_q'] = ex
+    # ── 工具函数：自动绘图 ────────────────────────────────────
+    def _auto_chart(df: pd.DataFrame):
+        if df.empty or len(df.columns) < 2:
+            st.dataframe(df, use_container_width=True)
+            return
+        all_cols = df.columns.tolist()
+        num_cols = df.select_dtypes(include='number').columns.tolist()
+        if not num_cols:
+            st.dataframe(df, use_container_width=True)
+            return
+        x_col = all_cols[0]
+        x_lower = str(x_col).lower()
+        if any(k in x_lower for k in ['time', 'start', 'hour', 'dt', 'date']):
+            fig = px.line(df, x=x_col, y=num_cols, markers=True)
+        elif df[x_col].dtype == object:
+            fig = px.bar(df.head(20), x=num_cols[0], y=x_col, orientation='h',
+                         color=num_cols[0], color_continuous_scale='Blues')
+            fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+        else:
+            fig = px.bar(df.head(20), x=x_col, y=num_cols[0])
+        fig.update_layout(margin=dict(l=0, r=0, t=20, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── 顶栏：示例问题 + 清空按钮 ─────────────────────────────
+    top_l, top_r = st.columns([5, 1])
+    with top_r:
+        if st.button("🗑 清空对话", use_container_width=True):
+            st.session_state['chat_messages']  = []
+            st.session_state['nl2sql_history'] = []
+            st.session_state['rag_history']    = []
+            st.rerun()
+
+    with top_l:
+        examples = [
+            "最近10分钟每分钟订单量和GMV趋势",
+            "今日各品类销售额排行",
+            "GMV 和 payment_value 有什么区别？",
+            "order_status 有哪些状态？",
+        ]
+        st.markdown("**快速提问**")
+        ecols = st.columns(4)
+        for i, ex in enumerate(examples):
+            if ecols[i].button(ex, key=f"ex_{i}", use_container_width=True):
+                st.session_state['pending_question'] = ex
 
     st.markdown("---")
-    question = st.text_area(
-        "输入你的问题",
-        value=st.session_state.get('nl_q', ''),
-        height=80, key='nl_q',
-        placeholder="例如：最近10分钟每分钟的订单量趋势",
-    )
 
-    c1, c2 = st.columns([1, 5])
-    run_btn  = c1.button("查询", type="primary", use_container_width=True)
-    with_ins = c2.checkbox("生成 AI 洞察", value=True)
-
-    if run_btn and question.strip():
-        from ai_layer.nl2sql import nl2sql
-        with st.spinner("AI 正在分析..."):
-            res = nl2sql(question, with_insight=with_ins)
-
-        if res['error']:
-            st.error(f"查询失败：{res['error']}")
-        else:
-            with st.expander("生成的 SQL", expanded=True):
-                st.code(res['sql'], language='sql')
-
-            if res['insight']:
-                st.info(f"💡 {res['insight']}")
-
-            df = res['data']
-            st.markdown(f"**查询结果（{res['row_count']} 行）**")
-
-            tab1, tab2 = st.tabs(["图表", "数据表"])
-            with tab1:
-                cols = df.columns.tolist()
-                num_cols = df.select_dtypes(include='number').columns.tolist()
-                if len(cols) >= 2 and num_cols:
-                    x_col, y_col = cols[0], num_cols[0]
-                    x_lower = str(x_col).lower()
-                    if any(k in x_lower for k in ['time', 'start', 'hour', 'dt', 'date']):
-                        fig = px.line(df, x=x_col, y=num_cols, markers=True)
-                    elif df[x_col].dtype == object:
-                        fig = px.bar(df.head(20), x=y_col, y=x_col, orientation='h',
-                                     color=y_col, color_continuous_scale='Blues')
-                        fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+    # ── 历史消息渲染 ──────────────────────────────────────────
+    for msg in st.session_state['chat_messages']:
+        with st.chat_message(msg['role']):
+            if msg['role'] == 'user':
+                st.markdown(msg['content'])
+            else:
+                msg_type = msg.get('type', 'text')
+                if msg_type == 'nl2sql':
+                    if msg.get('error'):
+                        st.error(f"查询失败：{msg['error']}")
                     else:
-                        fig = px.bar(df.head(20), x=x_col, y=y_col)
-                    st.plotly_chart(fig, use_container_width=True)
+                        if msg.get('insight'):
+                            st.info(f"💡 {msg['insight']}")
+                        with st.expander("查看 SQL", expanded=False):
+                            st.code(msg.get('sql', ''), language='sql')
+                        df = msg.get('data')
+                        if df is not None and not df.empty:
+                            tab1, tab2 = st.tabs(["图表", "数据表"])
+                            with tab1:
+                                _auto_chart(df)
+                            with tab2:
+                                st.dataframe(df, use_container_width=True, hide_index=True)
+                                st.download_button(
+                                    "下载 CSV",
+                                    df.to_csv(index=False, encoding='utf-8-sig'),
+                                    f"result_{len(st.session_state['chat_messages'])}.csv",
+                                    "text/csv",
+                                    key=f"dl_{len(st.session_state['chat_messages'])}_{id(df)}"
+                                )
+                        else:
+                            st.warning("查询结果为空")
+                elif msg_type == 'rag':
+                    st.markdown(msg['content'])
+                    if msg.get('sources'):
+                        st.caption(f"来源：{', '.join(msg['sources'])}")
                 else:
-                    st.dataframe(df, use_container_width=True)
+                    st.markdown(msg['content'])
 
-            with tab2:
-                st.dataframe(df, use_container_width=True)
-                st.download_button("下载 CSV", df.to_csv(index=False, encoding='utf-8-sig'),
-                                   "result.csv", "text/csv")
-    elif run_btn:
-        st.warning("请输入问题")
+    # ── 输入框 ─────────────────────────────────────────────────
+    pending = st.session_state.pop('pending_question', None)
+    question = st.chat_input("输入问题，支持追问（例如：再按州分组 / 那取消率呢？）")
+    question = question or pending
+
+    if question:
+        # 追加用户消息
+        st.session_state['chat_messages'].append({'role': 'user', 'content': question})
+
+        with st.chat_message('user'):
+            st.markdown(question)
+
+        with st.chat_message('assistant'):
+            # ── 路由判断 ──────────────────────────────────────
+            from ai_layer.rag_engine import route_question, rag_query
+            from ai_layer.nl2sql import nl2sql
+
+            # 有 NL2SQL 历史时，追问大概率还是数据查询，跳过路由 LLM 节省成本
+            route = 'nl2sql'
+            if not st.session_state['nl2sql_history'] and not st.session_state['rag_history']:
+                with st.spinner("路由分析中..."):
+                    route = route_question(question)
+            elif st.session_state['rag_history'] and not st.session_state['nl2sql_history']:
+                # 上一轮是 RAG，先用快速规则判断
+                kw_data = any(k in question for k in ['查', '多少', '排行', '趋势', '分钟', '今日', '最近', 'SQL', 'sql'])
+                route = 'nl2sql' if kw_data else 'rag'
+            elif st.session_state['rag_history']:
+                # 混合历史：关键词判断
+                kw_knowledge = any(k in question for k in ['什么是', '定义', '含义', '区别', '规则', '说明', '怎么', '为什么'])
+                route = 'rag' if kw_knowledge else 'nl2sql'
+
+            # ── NL2SQL 分支 ───────────────────────────────────
+            if route == 'nl2sql':
+                with st.spinner("生成 SQL 并查询中..."):
+                    res = nl2sql(
+                        question,
+                        with_insight=True,
+                        history=st.session_state['nl2sql_history'],
+                    )
+
+                if res['error']:
+                    st.error(f"查询失败：{res['error']}")
+                    st.session_state['chat_messages'].append({
+                        'role': 'assistant', 'type': 'nl2sql',
+                        'error': res['error'],
+                    })
+                else:
+                    if res.get('insight'):
+                        st.info(f"💡 {res['insight']}")
+                    with st.expander("查看 SQL", expanded=False):
+                        st.code(res['sql'], language='sql')
+                    df = res['data']
+                    if not df.empty:
+                        tab1, tab2 = st.tabs(["图表", "数据表"])
+                        with tab1:
+                            _auto_chart(df)
+                        with tab2:
+                            st.dataframe(df, use_container_width=True, hide_index=True)
+                            st.download_button(
+                                "下载 CSV",
+                                df.to_csv(index=False, encoding='utf-8-sig'),
+                                "result.csv", "text/csv",
+                                key=f"dl_new_{len(st.session_state['chat_messages'])}"
+                            )
+                    else:
+                        st.warning("查询结果为空")
+
+                    # 更新 NL2SQL 历史
+                    st.session_state['nl2sql_history'].append({
+                        'question': question,
+                        'sql': res['sql'],
+                        'result_summary': res.get('result_summary', ''),
+                    })
+                    if len(st.session_state['nl2sql_history']) > 5:
+                        st.session_state['nl2sql_history'].pop(0)
+
+                    st.session_state['chat_messages'].append({
+                        'role': 'assistant', 'type': 'nl2sql',
+                        'sql': res['sql'],
+                        'insight': res.get('insight', ''),
+                        'data': df,
+                        'error': None,
+                    })
+
+            # ── RAG 分支 ──────────────────────────────────────
+            else:
+                with st.spinner("检索知识库中..."):
+                    res = rag_query(question, history=st.session_state['rag_history'])
+
+                st.markdown(res['answer'])
+                if res.get('sources'):
+                    st.caption(f"来源：{', '.join(res['sources'])}")
+
+                # 更新 RAG 历史
+                st.session_state['rag_history'].append({
+                    'question': question,
+                    'answer': res['answer'],
+                })
+                if len(st.session_state['rag_history']) > 8:
+                    st.session_state['rag_history'].pop(0)
+
+                st.session_state['chat_messages'].append({
+                    'role': 'assistant', 'type': 'rag',
+                    'content': res['answer'],
+                    'sources': res.get('sources', []),
+                })
 
 
 # ══════════════════════════════════════════════════════════════

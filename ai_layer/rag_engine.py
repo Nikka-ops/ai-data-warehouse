@@ -124,34 +124,59 @@ def retrieve(question: str, top_k: int | None = None) -> list:
 
 # ── RAG 问答 ──────────────────────────────────────────────────
 
-RAG_PROMPT = """你是一位专业的数据分析顾问，熟悉本公司的数据仓库和业务规则。
+RAG_SYSTEM_PROMPT = """你是一位专业的数据分析顾问，熟悉本公司的数据仓库和业务规则。
 请根据以下知识库内容回答用户的问题。
 
 【相关知识】
 {context}
 
-【用户问题】
-{question}
-
 【回答要求】
 - 根据知识库内容准确回答，不要编造知识库中没有的信息
 - 如果知识库中没有相关信息，直接说"知识库中暂无此信息"
+- 如果用户的问题引用了上文（如"它"、"这个"、"刚才说的"），请结合对话历史理解
 - 回答简洁清晰，使用中文
 """
 
+
+def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
+    """结合最近1轮历史扩展检索词，提升上下文相关检索质量"""
+    if not history:
+        return question
+    last = history[-1]
+    # 把上一轮的问题和答案前80字拼接到当前问题，增强检索相关性
+    ctx = last.get('question', '') + ' ' + last.get('answer', '')[:80]
+    return f"{ctx} {question}"
+
+
 @llm_retry
-def rag_query(question: str) -> dict:
+def rag_query(question: str, history: list[dict] | None = None) -> dict:
+    """
+    history 格式（每轮一个 dict）：
+      [{'question': str, 'answer': str}, ...]
+    """
     log.info('[RAG检索] %s', question)
-    chunks = retrieve(question)
+
+    # 用扩展后的检索词做向量检索，召回更相关的文本块
+    retrieval_query = _build_retrieval_query(question, history)
+    chunks = retrieve(retrieval_query)
     log.info('[RAG检索] 找到 %d 个相关文本块', len(chunks))
 
     context = '\n\n---\n\n'.join(
         [f"来源：{c['source']}\n{c['text']}" for c in chunks]
     )
-    prompt = RAG_PROMPT.format(context=context, question=question)
+
+    # 构建 messages：system + 历史对话 + 当前问题
+    messages: list[dict] = [
+        {'role': 'system', 'content': RAG_SYSTEM_PROMPT.format(context=context)}
+    ]
+    for turn in (history or [])[-5:]:   # 最多保留最近5轮历史
+        messages.append({'role': 'user',      'content': turn['question']})
+        messages.append({'role': 'assistant', 'content': turn['answer']})
+    messages.append({'role': 'user', 'content': question})
+
     response = llm.chat.completions.create(
         model=cfg.llm_model,
-        messages=[{'role': 'user', 'content': prompt}],
+        messages=messages,
         temperature=cfg.rag_temperature,
         max_tokens=800,
     )
