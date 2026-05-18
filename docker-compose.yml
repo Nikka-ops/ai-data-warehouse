@@ -167,6 +167,26 @@ services:
     volumes:
       - .:/app
 
+  # ─── AI ETL Agent ────────────────────────────────────────
+  ai-etl:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: ai_dw_etl_agent
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+    command: python ai_etl/ai_etl_agent.py --loop 60 --lookback 5
+    restart: on-failure
+    volumes:
+      - .:/app
+
   # ─── Streamlit 看板 ───────────────────────────────────────
   dashboard:
     build:
