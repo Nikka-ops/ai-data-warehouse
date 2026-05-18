@@ -34,6 +34,44 @@ def safe_query(sql: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# ── session_state 全局初始化 ──────────────────────────────────
+def _init_session_state():
+    if 'session_id'      not in st.session_state:
+        from ai_layer.session_manager import new_session_id
+        st.session_state['session_id']      = new_session_id()
+    if 'chat_messages'   not in st.session_state:
+        st.session_state['chat_messages']   = []
+    if 'nl2sql_history'  not in st.session_state:
+        st.session_state['nl2sql_history']  = []
+    if 'rag_history'     not in st.session_state:
+        st.session_state['rag_history']     = []
+    if 'turn_index'      not in st.session_state:
+        st.session_state['turn_index']      = 0
+
+_init_session_state()
+
+
+def _load_session(session_id: str):
+    """从 ClickHouse 恢复历史会话到 session_state"""
+    from ai_layer.session_manager import load_session
+    data = load_session(session_id)
+    st.session_state['session_id']     = session_id
+    st.session_state['chat_messages']  = data['chat_messages']
+    st.session_state['nl2sql_history'] = data['nl2sql_history']
+    st.session_state['rag_history']    = data['rag_history']
+    # turn_index 从已有轮数继续
+    st.session_state['turn_index']     = len(data['chat_messages'])
+
+
+def _clear_session():
+    from ai_layer.session_manager import new_session_id
+    st.session_state['session_id']     = new_session_id()
+    st.session_state['chat_messages']  = []
+    st.session_state['nl2sql_history'] = []
+    st.session_state['rag_history']    = []
+    st.session_state['turn_index']     = 0
+
+
 # ── 侧边栏 ────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚡ 实时 AI 数仓")
@@ -43,7 +81,7 @@ with st.sidebar:
         cnt = get_ch().query(
             "SELECT count() FROM ods.orders_stream WHERE _ingest_time >= now() - INTERVAL 1 MINUTE"
         ).first_row[0]
-        st.success(f"ClickHouse 已连接")
+        st.success("ClickHouse 已连接")
         st.metric("近1分钟入库", f"{cnt} 条")
     except Exception as e:
         st.error(f"连接失败：{e}")
@@ -58,6 +96,39 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**导航**")
     page = st.radio("", ["实时监控", "智能查询", "Agent 分析"], label_visibility="collapsed")
+
+    # ── 历史会话（仅在智能查询页显示）──────────────────────────
+    if page == "智能查询":
+        st.markdown("---")
+        st.markdown("**历史会话**")
+
+        from ai_layer.session_manager import list_recent_sessions
+        sessions = list_recent_sessions(limit=10)
+
+        if not sessions:
+            st.caption("暂无历史会话")
+        else:
+            cur_sid = st.session_state.get('session_id', '')
+            for s in sessions:
+                sid   = s['session_id']
+                name  = s['session_name'] or s['first_question']
+                label = f"{'▶ ' if sid == cur_sid else ''}{name}"
+                turns = s['turn_count']
+                ts    = s['started_at'].strftime('%m-%d %H:%M') if s['started_at'] else ''
+                with st.container():
+                    col_btn, col_info = st.columns([3, 1])
+                    if col_btn.button(label[:30], key=f"ses_{sid}",
+                                      use_container_width=True,
+                                      type="primary" if sid == cur_sid else "secondary"):
+                        if sid != cur_sid:
+                            _load_session(sid)
+                            st.rerun()
+                    col_info.caption(f"{turns}轮\n{ts}")
+
+        st.markdown("---")
+        if st.button("＋ 新建会话", use_container_width=True):
+            _clear_session()
+            st.rerun()
 
     st.markdown("---")
     st.caption("数据来源：Kafka → Flink → ClickHouse")
@@ -211,16 +282,11 @@ if page == "实时监控":
 # 页面 2：智能查询（多轮对话 NL2SQL + RAG）
 # ══════════════════════════════════════════════════════════════
 elif page == "智能查询":
-    st.title("💬 智能查询")
-    st.caption("支持多轮对话 · 自动路由 NL2SQL / 知识库问答 · 数据来自 Kafka 实时流")
+    from ai_layer.session_manager import save_turn
 
-    # ── 初始化 session state ──────────────────────────────────
-    if 'chat_messages' not in st.session_state:
-        st.session_state['chat_messages'] = []   # 展示用消息列表
-    if 'nl2sql_history' not in st.session_state:
-        st.session_state['nl2sql_history'] = []  # NL2SQL 历史（含 sql/result_summary）
-    if 'rag_history' not in st.session_state:
-        st.session_state['rag_history'] = []     # RAG 历史（含 question/answer）
+    st.title("💬 智能查询")
+    cur_sid = st.session_state['session_id']
+    st.caption(f"支持多轮对话 · 自动路由 NL2SQL / 知识库问答 · 会话 ID：`{cur_sid[:8]}...`")
 
     # ── 工具函数：自动绘图 ────────────────────────────────────
     def _auto_chart(df: pd.DataFrame):
@@ -248,10 +314,8 @@ elif page == "智能查询":
     # ── 顶栏：示例问题 + 清空按钮 ─────────────────────────────
     top_l, top_r = st.columns([5, 1])
     with top_r:
-        if st.button("🗑 清空对话", use_container_width=True):
-            st.session_state['chat_messages']  = []
-            st.session_state['nl2sql_history'] = []
-            st.session_state['rag_history']    = []
+        if st.button("🗑 新建对话", use_container_width=True):
+            _clear_session()
             st.rerun()
 
     with top_l:
@@ -313,30 +377,33 @@ elif page == "智能查询":
     question = question or pending
 
     if question:
-        # 追加用户消息
+        tidx = st.session_state['turn_index']
+
+        # 保存用户消息到 ClickHouse
+        save_turn(cur_sid, tidx, 'user', content=question)
         st.session_state['chat_messages'].append({'role': 'user', 'content': question})
+        st.session_state['turn_index'] += 1
 
         with st.chat_message('user'):
             st.markdown(question)
 
         with st.chat_message('assistant'):
-            # ── 路由判断 ──────────────────────────────────────
             from ai_layer.rag_engine import route_question, rag_query
             from ai_layer.nl2sql import nl2sql
 
-            # 有 NL2SQL 历史时，追问大概率还是数据查询，跳过路由 LLM 节省成本
+            # 路由：首轮无历史时调用 LLM 路由，后续用关键词规则节省成本
             route = 'nl2sql'
             if not st.session_state['nl2sql_history'] and not st.session_state['rag_history']:
                 with st.spinner("路由分析中..."):
                     route = route_question(question)
             elif st.session_state['rag_history'] and not st.session_state['nl2sql_history']:
-                # 上一轮是 RAG，先用快速规则判断
                 kw_data = any(k in question for k in ['查', '多少', '排行', '趋势', '分钟', '今日', '最近', 'SQL', 'sql'])
                 route = 'nl2sql' if kw_data else 'rag'
             elif st.session_state['rag_history']:
-                # 混合历史：关键词判断
                 kw_knowledge = any(k in question for k in ['什么是', '定义', '含义', '区别', '规则', '说明', '怎么', '为什么'])
                 route = 'rag' if kw_knowledge else 'nl2sql'
+
+            a_tidx = st.session_state['turn_index']
 
             # ── NL2SQL 分支 ───────────────────────────────────
             if route == 'nl2sql':
@@ -349,9 +416,10 @@ elif page == "智能查询":
 
                 if res['error']:
                     st.error(f"查询失败：{res['error']}")
+                    save_turn(cur_sid, a_tidx, 'assistant', 'nl2sql',
+                              content=f"查询失败：{res['error']}")
                     st.session_state['chat_messages'].append({
-                        'role': 'assistant', 'type': 'nl2sql',
-                        'error': res['error'],
+                        'role': 'assistant', 'type': 'nl2sql', 'error': res['error'],
                     })
                 else:
                     if res.get('insight'):
@@ -369,12 +437,18 @@ elif page == "智能查询":
                                 "下载 CSV",
                                 df.to_csv(index=False, encoding='utf-8-sig'),
                                 "result.csv", "text/csv",
-                                key=f"dl_new_{len(st.session_state['chat_messages'])}"
+                                key=f"dl_new_{a_tidx}"
                             )
                     else:
                         st.warning("查询结果为空")
 
-                    # 更新 NL2SQL 历史
+                    # 持久化 assistant 消息（用户问题类型标记为 nl2sql_q，便于恢复历史）
+                    save_turn(cur_sid, tidx, 'user', 'nl2sql_q', content=question)
+                    save_turn(cur_sid, a_tidx, 'assistant', 'nl2sql',
+                              content=res.get('insight', ''),
+                              sql_text=res['sql'],
+                              result_summary=res.get('result_summary', ''))
+
                     st.session_state['nl2sql_history'].append({
                         'question': question,
                         'sql': res['sql'],
@@ -400,7 +474,12 @@ elif page == "智能查询":
                 if res.get('sources'):
                     st.caption(f"来源：{', '.join(res['sources'])}")
 
-                # 更新 RAG 历史
+                # 持久化
+                save_turn(cur_sid, tidx, 'user', 'rag_q', content=question)
+                save_turn(cur_sid, a_tidx, 'assistant', 'rag',
+                          content=res['answer'],
+                          sources=','.join(res.get('sources', [])))
+
                 st.session_state['rag_history'].append({
                     'question': question,
                     'answer': res['answer'],
@@ -413,6 +492,8 @@ elif page == "智能查询":
                     'content': res['answer'],
                     'sources': res.get('sources', []),
                 })
+
+            st.session_state['turn_index'] += 1
 
 
 # ══════════════════════════════════════════════════════════════
