@@ -139,8 +139,53 @@ services:
         condition: service_healthy
     environment:
       <<: *common-env
-    command: python kafka/producer.py --mode scenario
+    command: python kafka/producer.py --mode scenario --rate 30
     <<: *restart-policy
+
+  # ─── Lambda 离线层：历史数据加载（一次性，90天×3万条=270万行）
+  batch-loader:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_batch_loader
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python batch/historical_loader.py --days 90 --daily-orders 30000
+    restart: "no"
+    volumes:
+      - .:/app
+
+  # ─── Lambda 批实时对账（每10分钟）────────────────────────
+  reconciler:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_reconciler
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python batch/reconciler.py --days 3 --loop 600
+    <<: *restart-policy
+    volumes:
+      - .:/app
+
+  # ─── AI 告警自动排查（每60秒）───────────────────────────
+  alert-investigator:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_alert_investigator
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python ai_layer/alert_investigator.py --loop 60
+    <<: *restart-policy
+    volumes:
+      - .:/app
 
   flink-jobmanager:
     image: flink:1.18-scala_2.12

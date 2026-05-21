@@ -18,18 +18,28 @@ CH_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "admin123")
 
 # ── 核心数据集：表名 → 描述（供 Superset 展示）─────────────────
 DATASETS = [
-    # schema, table, description
-    ("dws",    "realtime_minute_stats",   "分钟级实时聚合（订单量/GMV/均价）"),
-    ("dws",    "realtime_forecast",       "AI 预测数据（Holt双指数平滑）"),
-    ("ods",    "orders_stream",           "实时订单流 ODS"),
-    ("ods",    "payments_stream",         "实时支付流 ODS"),
-    ("dwd",    "realtime_order_detail",   "订单+支付宽表 DWD"),
-    ("ads",    "realtime_hourly",         "今日小时聚合视图"),
-    ("ads",    "realtime_category_today", "今日品类排行视图"),
-    ("ads",    "realtime_state_today",    "今日州排行视图"),
-    ("stream", "ai_quality_alerts",       "AI 质检告警"),
-    ("stream", "proactive_insights",      "AI 主动洞察"),
-    ("stream", "etl_audit_log",          "ETL 审计日志"),
+    # ── 实时速度层 ──────────────────────────────────────────
+    ("ods",    "orders_stream",            "实时订单流 ODS（Kafka 落地）"),
+    ("ods",    "payments_stream",          "实时支付流 ODS"),
+    ("dwd",    "realtime_order_detail",    "订单+支付宽表 DWD（Flink JOIN）"),
+    ("dws",    "realtime_minute_stats",    "分钟级实时聚合（Flink 窗口）"),
+    ("dws",    "realtime_forecast",        "AI 预测数据（Holt双指数平滑）"),
+    ("ads",    "realtime_hourly",          "今日小时聚合视图"),
+    ("ads",    "realtime_category_today",  "今日品类排行视图"),
+    ("ads",    "realtime_state_today",     "今日州排行视图"),
+    # ── Lambda 离线批处理层 ─────────────────────────────────
+    ("ods",    "orders_batch",             "历史订单 ODS（Lambda 离线层，90天批量加载）"),
+    ("ods",    "payments_batch",           "历史支付 ODS（Lambda 离线层）"),
+    ("dws",    "batch_daily_stats",        "批处理日级汇总（Lambda 离线层聚合结果）"),
+    # ── Lambda 服务层（批+实时合并）─────────────────────────
+    ("dws",    "serving_daily",            "Lambda 服务层日级视图（历史批+今日实时）"),
+    ("dws",    "serving_category",         "Lambda 服务层品类视图（历史批+今日实时）"),
+    ("stream", "lambda_reconciliation",    "Lambda 批实时数据一致性对账记录"),
+    # ── AI 分析层 ────────────────────────────────────────────
+    ("stream", "ai_quality_alerts",        "AI 质检告警"),
+    ("stream", "alert_investigations",     "AI 告警自动排查记录"),
+    ("stream", "proactive_insights",       "AI 主动洞察（每5分钟）"),
+    ("stream", "etl_audit_log",           "ETL 审计日志"),
 ]
 
 

@@ -154,23 +154,6 @@ def generate_insight(context: str) -> str:
 
 
 @tool
-def save_report(title: str, content: str) -> str:
-    """将分析结果保存为 Markdown 报告文件。title=报告标题，content=正文（Markdown格式）。"""
-    try:
-        os.makedirs(cfg.reports_dir, exist_ok=True)
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe = re.sub(r'[\\/:*?"<>|]', '_', title)
-        path = os.path.join(cfg.reports_dir, f"{safe}_{ts}.md")
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(f"# {title}\n\n生成时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n\n---\n\n{content}")
-        log.info('[save_report] 已保存：%s', path)
-        return f'报告已保存：{path}'
-    except Exception as e:
-        log.error('[save_report] 失败：%s', e)
-        return f'保存失败：{e}'
-
-
-@tool
 def get_etl_status(lookback_hours: int = 1) -> str:
     """
     查询 AI ETL Agent 的最新运行状态和审计日志。
@@ -268,6 +251,68 @@ def get_proactive_insights(limit: int = 5) -> str:
         return f'查询洞察失败：{e}'
 
 
+@tool
+def get_lambda_status(days: int = 7) -> str:
+    """
+    查询 Lambda 架构批实时对账状态，对比离线层和实时层的数据一致性。
+    - days: 查询最近 N 天的对账记录（默认7天）
+    返回：每天的批处理量、实时量、差异百分比和一致性状态。
+    """
+    try:
+        ch = _get_ch()
+        df = ch.query_df(f"""
+            SELECT check_date, batch_order_cnt, stream_order_cnt,
+                   cnt_diff_pct, gmv_diff_pct, check_status
+            FROM stream.lambda_reconciliation
+            WHERE check_time >= now() - INTERVAL {days} DAY
+            ORDER BY check_date DESC
+            LIMIT 30
+        """)
+        batch_total = ch.query(
+            "SELECT count(), sum(order_cnt) FROM dws.batch_daily_stats"
+        ).first_row
+        result = f"## Lambda 架构对账状态（最近 {days} 天）\n\n"
+        result += f"**离线层总量**：{batch_total[0]} 个分区，{batch_total[1]:,} 条订单\n\n"
+        if df.empty:
+            result += "暂无对账记录（reconciler 服务可能未启动）\n"
+        else:
+            result += df.to_markdown(index=False)
+        return result
+    except Exception as e:
+        log.error('[get_lambda_status] 失败：%s', e)
+        return f'查询 Lambda 状态失败：{e}'
+
+
+@tool
+def get_alert_investigations(limit: int = 10) -> str:
+    """
+    查询 AI 告警自动排查记录，了解近期告警的根因分析和处置结果。
+    - limit: 返回最近 N 条排查记录（默认10）
+    """
+    try:
+        ch = _get_ch()
+        rows = ch.query(f"""
+            SELECT investigation_time, alert_type, alert_severity,
+                   root_cause, impact_scope, auto_action, status, confidence
+            FROM stream.alert_investigations
+            ORDER BY investigation_time DESC
+            LIMIT {limit}
+        """).result_rows
+        if not rows:
+            return '暂无排查记录（告警排查服务可能未启动）'
+        lines = [f"## AI 告警排查记录（最近 {len(rows)} 条）\n"]
+        for r in rows:
+            lines.append(
+                f"**[{r[2]}] {r[1]}** `{str(r[0])[:16]}`  \n"
+                f"根因：{r[3]}  \n影响：{r[4]}  \n"
+                f"操作：{r[5]}  状态：`{r[7]}`  置信度：{float(r[8] or 0):.0%}\n"
+            )
+        return '\n---\n'.join(lines)
+    except Exception as e:
+        log.error('[get_alert_investigations] 失败：%s', e)
+        return f'查询排查记录失败：{e}'
+
+
 ALL_TOOLS = [query_data, query_knowledge, detect_realtime_anomaly,
-             generate_insight, save_report, get_etl_status,
-             get_forecast, get_proactive_insights]
+             generate_insight, get_etl_status, get_forecast,
+             get_proactive_insights, get_lambda_status, get_alert_investigations]

@@ -309,10 +309,10 @@ elif page == "🤖 Agent 分析":
     st.title("🤖 Agent 分析")
     st.caption("AI Agent 自主多步推理，调用 ClickHouse + 知识库 + 预测 + 洞察等工具")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["异常检测", "运营快报", "AI 洞察", "自由分析"])
+    tab1, tab2, tab3, tab4 = st.tabs(["异常检测", "Lambda 对账", "AI 洞察", "自由分析"])
 
     with tab1:
-        st.markdown("**自动检测分钟级流量异常（2σ基线法），生成检测报告**")
+        st.markdown("**实时异常检测（2σ基线法）+ AI 告警自动排查结论**")
         if st.button("▶ 启动异常检测", key="anomaly", type="primary"):
             from ai_layer.agents import run_anomaly_agent
             with st.spinner("Agent 运行中（约30-60秒）..."):
@@ -329,16 +329,39 @@ elif page == "🤖 Agent 分析":
                     st.error(f"Agent 运行失败：{e}")
 
     with tab2:
-        st.markdown("**汇总今日多维度实时数据，生成运营快报**")
-        if st.button("▶ 生成运营快报", key="report", type="primary"):
-            from ai_layer.agents import run_report_agent
-            with st.spinner("Agent 运行中（约30-60秒）..."):
-                try:
-                    result = run_report_agent()
-                    st.success("快报生成完成")
-                    st.write(result['output'])
-                except Exception as e:
-                    st.error(f"Agent 运行失败：{e}")
+        st.markdown("**Lambda 架构批实时数据一致性校验（离线层 vs 速度层）**")
+        col_l, col_r = st.columns(2)
+        with col_l:
+            if st.button("▶ 运行 Lambda 一致性分析", key="lambda_agent", type="primary"):
+                from ai_layer.agents import run_lambda_agent
+                with st.spinner("Agent 分析中..."):
+                    try:
+                        result = run_lambda_agent()
+                        st.success("分析完成")
+                        st.write(result['output'])
+                    except Exception as e:
+                        st.error(f"Agent 运行失败：{e}")
+        with col_r:
+            st.markdown("**对账记录（最近7天）**")
+            try:
+                rows = clickhouse_connect.get_client(
+                    host=cfg.ch_host, port=cfg.ch_port,
+                    username=cfg.ch_user, password=cfg.ch_password,
+                    connect_timeout=5, send_receive_timeout=15,
+                ).query("""
+                    SELECT check_date, batch_order_cnt, stream_order_cnt,
+                           cnt_diff_pct, check_status
+                    FROM stream.lambda_reconciliation
+                    ORDER BY check_date DESC LIMIT 7
+                """).result_rows
+                if rows:
+                    import pandas as pd
+                    df_rec = pd.DataFrame(rows, columns=['日期','批处理量','实时量','差异%','状态'])
+                    st.dataframe(df_rec, use_container_width=True, hide_index=True)
+                else:
+                    st.info("暂无对账记录（需先运行历史数据加载 + reconciler 服务）")
+            except Exception as e:
+                st.warning(f"查询失败：{e}")
 
     with tab3:
         st.markdown("**查看 AI 主动洞察引擎生成的最新洞察报告**")
