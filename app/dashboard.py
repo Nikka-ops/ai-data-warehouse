@@ -309,7 +309,7 @@ elif page == "🤖 Agent 分析":
     st.title("🤖 Agent 分析")
     st.caption("AI Agent 自主多步推理，调用 ClickHouse + 知识库 + 预测 + 洞察等工具")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["异常检测", "Lambda 对账", "AI 洞察", "自由分析"])
+    tab1, tab2, tab3, tab4 = st.tabs(["异常检测", "Kappa 回放", "AI 洞察", "自由分析"])
 
     with tab1:
         st.markdown("**实时异常检测（2σ基线法）+ AI 告警自动排查结论**")
@@ -329,37 +329,68 @@ elif page == "🤖 Agent 分析":
                     st.error(f"Agent 运行失败：{e}")
 
     with tab2:
-        st.markdown("**Lambda 架构批实时数据一致性校验（离线层 vs 速度层）**")
+        st.markdown("**Kappa 架构：Flink 历史回放状态 + AI 驱动重算**")
+        st.caption("单一流处理路径：Kafka（永久保留）→ Flink（实时 + 回放）→ ClickHouse")
+
+        import clickhouse_connect as _cc
         col_l, col_r = st.columns(2)
+
         with col_l:
-            if st.button("▶ 运行 Lambda 一致性分析", key="lambda_agent", type="primary"):
-                from ai_layer.agents import run_lambda_agent
+            st.markdown("**回放任务管理**")
+            if st.button("▶ AI 分析 Kappa 状态", key="kappa_agent", type="primary"):
+                from ai_layer.agents import run_kappa_agent
                 with st.spinner("Agent 分析中..."):
                     try:
-                        result = run_lambda_agent()
+                        result = run_kappa_agent()
                         st.success("分析完成")
                         st.write(result['output'])
                     except Exception as e:
                         st.error(f"Agent 运行失败：{e}")
-        with col_r:
-            st.markdown("**对账记录（最近7天）**")
+
+            st.markdown("---")
+            st.markdown("**历史覆盖概览**")
             try:
-                rows = clickhouse_connect.get_client(
+                ch = _cc.get_client(
+                    host=cfg.ch_host, port=cfg.ch_port,
+                    username=cfg.ch_user, password=cfg.ch_password,
+                    connect_timeout=5, send_receive_timeout=15,
+                )
+                cov = ch.query("""
+                    SELECT count() AS hours, min(hour_start) AS earliest,
+                           max(hour_start) AS latest, sum(order_cnt) AS orders,
+                           round(sum(total_gmv), 0) AS gmv
+                    FROM dws.kappa_hourly_agg
+                """).first_row
+                if cov and cov[0] > 0:
+                    st.metric("已回放小时数", f"{cov[0]:,}")
+                    st.metric("覆盖起点", str(cov[1])[:16] if cov[1] else "—")
+                    st.metric("最新时间", str(cov[2])[:16] if cov[2] else "—")
+                    st.metric("总订单数", f"{int(cov[3]):,}")
+                    st.metric("总 GMV", f"R${float(cov[4]):,.0f}")
+                else:
+                    st.info("暂无历史聚合数据（可运行 flink-replay 服务执行回放）")
+            except Exception as e:
+                st.warning(f"查询失败：{e}")
+
+        with col_r:
+            st.markdown("**回放任务记录**")
+            try:
+                rows = _cc.get_client(
                     host=cfg.ch_host, port=cfg.ch_port,
                     username=cfg.ch_user, password=cfg.ch_password,
                     connect_timeout=5, send_receive_timeout=15,
                 ).query("""
-                    SELECT check_date, batch_order_cnt, stream_order_cnt,
-                           cnt_diff_pct, check_status
-                    FROM stream.lambda_reconciliation
-                    ORDER BY check_date DESC LIMIT 7
+                    SELECT job_name, triggered_by, start_time,
+                           records_processed, status
+                    FROM stream.kappa_replay_jobs
+                    ORDER BY start_time DESC LIMIT 10
                 """).result_rows
                 if rows:
                     import pandas as pd
-                    df_rec = pd.DataFrame(rows, columns=['日期','批处理量','实时量','差异%','状态'])
-                    st.dataframe(df_rec, use_container_width=True, hide_index=True)
+                    df_rep = pd.DataFrame(rows, columns=['任务名','触发方式','开始时间','处理量','状态'])
+                    st.dataframe(df_rep, use_container_width=True, hide_index=True)
                 else:
-                    st.info("暂无对账记录（需先运行历史数据加载 + reconciler 服务）")
+                    st.info("暂无回放任务记录")
             except Exception as e:
                 st.warning(f"查询失败：{e}")
 

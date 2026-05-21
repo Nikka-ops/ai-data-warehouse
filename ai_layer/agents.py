@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""实时 AI 分析 Agent（Tool Calling 模式）"""
+"""Kappa 架构 AI 分析 Agent（Tool Calling 模式）"""
 import os, sys
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_tool_calling_agent, AgentExecutor
@@ -11,7 +11,8 @@ from utils.logger import get_logger
 from ai_layer.tools import (
     query_data, query_knowledge, detect_realtime_anomaly,
     generate_insight, get_etl_status, get_forecast,
-    get_proactive_insights, get_lambda_status, get_alert_investigations,
+    get_proactive_insights, get_kappa_status, trigger_kappa_replay,
+    get_alert_investigations,
     ALL_TOOLS,
 )
 
@@ -72,33 +73,39 @@ def run_anomaly_agent():
 
 
 # ══════════════════════════════════════════════════════════════
-# Agent 2：Lambda 架构数据一致性分析
+# Agent 2：Kappa 架构状态分析
 # ══════════════════════════════════════════════════════════════
 
-LAMBDA_SYSTEM = """你是 Lambda 架构数据工程师，负责验证批处理层（离线）和实时层（速度层）的数据一致性。
+KAPPA_SYSTEM = """你是 Kappa 架构数据工程师，负责监控流处理管道健康状态和历史回放进度。
+
+Kappa 架构原则：
+- 单一处理路径：Kafka（可回放日志）→ Flink（统一流引擎）→ ClickHouse（服务层）
+- 历史重算：通过 Flink 从 Kafka offset=earliest 重放，无需独立批处理管道
+- 幂等写入：dws.kappa_hourly_agg 使用 ReplacingMergeTree，重放可安全多次执行
 
 执行步骤：
-1. 用 get_lambda_status 查看最近7天批实时对账状态
-2. 用 query_data 查离线层批处理汇总：
-   SELECT toStartOfMonth(stat_date) AS month, sum(order_cnt) AS orders,
-          round(sum(total_gmv),0) AS gmv FROM dws.batch_daily_stats
-   GROUP BY month ORDER BY month DESC LIMIT 3
-3. 用 query_data 查今日实时层数据：
-   SELECT count(DISTINCT order_id), round(sum(price),0)
-   FROM ods.orders_stream WHERE event_time >= today()
-4. 用 query_data 查服务层合并数据：
-   SELECT source, sum(order_cnt) AS orders, round(sum(total_gmv),0) AS gmv
-   FROM dws.serving_daily GROUP BY source ORDER BY source
-5. 用 generate_insight 生成批实时一致性分析结论
+1. 用 get_kappa_status 查看整体状态（Lag、历史覆盖、回放任务）
+2. 用 query_data 查 Kappa 服务层当前覆盖：
+   SELECT source, count() AS hours, sum(order_cnt) AS orders, round(sum(total_gmv),0) AS gmv
+   FROM dws.kappa_serving_unified GROUP BY source
+3. 用 query_data 查最近的消费 lag 趋势：
+   SELECT toStartOfHour(check_time) AS hour, avg(lag) AS avg_lag, max(lag) AS max_lag
+   FROM stream.kappa_consumer_lag WHERE check_time >= now() - INTERVAL 6 HOUR
+   GROUP BY hour ORDER BY hour
+4. 用 query_data 查今日实时处理量：
+   SELECT sum(order_cnt) AS orders, round(sum(total_gmv),0) AS gmv
+   FROM dws.realtime_minute_stats WHERE window_start >= today()
+5. 若历史覆盖不足（最近30天内有空洞），判断是否需要触发回放
+6. 用 generate_insight 生成 Kappa 架构健康分析报告
 
-输出：两层数据量、差异分析、Lambda 架构运行是否健康。"""
+输出：流处理是否健康，历史数据覆盖情况，是否建议触发回放，当前处理 lag。"""
 
 
-def run_lambda_agent():
-    tools = [query_data, get_lambda_status, generate_insight]
-    log.info('启动 Lambda 数据一致性分析 Agent')
-    return _make_executor(tools, LAMBDA_SYSTEM, max_iter=8).invoke(
-        {'input': '请分析 Lambda 架构批处理层和实时层的数据一致性'}
+def run_kappa_agent():
+    tools = [query_data, get_kappa_status, trigger_kappa_replay, generate_insight]
+    log.info('启动 Kappa 架构状态分析 Agent')
+    return _make_executor(tools, KAPPA_SYSTEM, max_iter=8).invoke(
+        {'input': '请分析 Kappa 架构流处理管道的健康状态和历史数据覆盖情况'}
     )
 
 
@@ -106,22 +113,28 @@ def run_lambda_agent():
 # Agent 3：自由分析（全工具权限）
 # ══════════════════════════════════════════════════════════════
 
-FREE_SYSTEM = """你是实时+离线数仓分析师，可自由调用工具分析数据。
+FREE_SYSTEM = """你是 Kappa 架构实时数仓分析师，可自由调用工具分析数据。
+
+架构：Kafka（日志）→ Flink（统一流处理：实时 + 历史回放）→ ClickHouse（服务层）
 
 可用实时表：
-- ods.orders_stream / ods.payments_stream  实时流原始数据
+- ods.orders_stream / ods.payments_stream  实时流原始数据（Kafka 落地）
 - dwd.realtime_order_detail               Flink JOIN 宽表
-- dws.realtime_minute_stats               分钟级聚合（Flink 窗口）
+- dws.realtime_minute_stats               分钟级聚合（Flink 实时窗口）
 - dws.realtime_forecast                   AI 预测数据
-- stream.ai_quality_alerts                AI 质检告警
+- stream.ai_quality_alerts                AI 质检告警（Flink 内嵌 AI 质量门控）
 - ads.realtime_hourly / realtime_category_today / realtime_state_today
 
-可用离线+服务层表：
-- ods.orders_batch                        历史批量数据（Lambda 离线层）
-- dws.batch_daily_stats                   批处理日级汇总
-- dws.serving_daily                       Lambda 服务层（批+实时合并）
-- dws.serving_category                    品类维度服务层
-- stream.lambda_reconciliation            批实时对账记录
+Kappa 历史聚合表（Flink 回放 Kafka 后写入）：
+- dws.kappa_hourly_agg                    小时级聚合（回放结果，幂等）
+- dws.kappa_serving_unified               统一服务视图（历史回放 + 实时互补）
+- dws.kappa_daily_trend                   日级趋势视图
+- dws.kappa_category_stats                品类维度视图
+- ads.kappa_current_totals                当前 GMV 汇总
+
+AI 与监控表：
+- stream.kappa_replay_jobs                回放任务记录
+- stream.kappa_consumer_lag               Kafka 消费 lag 监控
 - stream.alert_investigations             AI 告警排查记录
 - stream.proactive_insights               AI 主动洞察
 
@@ -139,7 +152,7 @@ if __name__ == '__main__':
     if mode == '1':
         r = run_anomaly_agent()
     elif mode == '2':
-        r = run_lambda_agent()
+        r = run_kappa_agent()
     else:
-        r = run_free_agent('分析当前实时数据异常情况和批实时一致性状态')
+        r = run_free_agent('分析当前 Kappa 架构实时流处理状态和历史数据覆盖情况')
     print('\n最终结论：', r['output'])

@@ -18,28 +18,30 @@ CH_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "admin123")
 
 # ── 核心数据集：表名 → 描述（供 Superset 展示）─────────────────
 DATASETS = [
-    # ── 实时速度层 ──────────────────────────────────────────
+    # ── 实时流层（Kafka 落地 + Flink 实时处理）──────────────
     ("ods",    "orders_stream",            "实时订单流 ODS（Kafka 落地）"),
-    ("ods",    "payments_stream",          "实时支付流 ODS"),
+    ("ods",    "payments_stream",          "实时支付流 ODS（Kafka 落地）"),
     ("dwd",    "realtime_order_detail",    "订单+支付宽表 DWD（Flink JOIN）"),
-    ("dws",    "realtime_minute_stats",    "分钟级实时聚合（Flink 窗口）"),
-    ("dws",    "realtime_forecast",        "AI 预测数据（Holt双指数平滑）"),
+    ("dws",    "realtime_minute_stats",    "分钟级实时聚合（Flink 1分钟窗口）"),
+    ("dws",    "realtime_forecast",        "AI 预测数据（Holt 双指数平滑）"),
     ("ads",    "realtime_hourly",          "今日小时聚合视图"),
     ("ads",    "realtime_category_today",  "今日品类排行视图"),
     ("ads",    "realtime_state_today",     "今日州排行视图"),
-    # ── Lambda 离线批处理层 ─────────────────────────────────
-    ("ods",    "orders_batch",             "历史订单 ODS（Lambda 离线层，90天批量加载）"),
-    ("ods",    "payments_batch",           "历史支付 ODS（Lambda 离线层）"),
-    ("dws",    "batch_daily_stats",        "批处理日级汇总（Lambda 离线层聚合结果）"),
-    # ── Lambda 服务层（批+实时合并）─────────────────────────
-    ("dws",    "serving_daily",            "Lambda 服务层日级视图（历史批+今日实时）"),
-    ("dws",    "serving_category",         "Lambda 服务层品类视图（历史批+今日实时）"),
-    ("stream", "lambda_reconciliation",    "Lambda 批实时数据一致性对账记录"),
+    # ── Kappa 历史聚合层（Flink 回放 Kafka 后写入）──────────
+    ("dws",    "kappa_hourly_agg",         "Kappa 小时级历史聚合（Flink 回放结果，幂等）"),
+    ("dws",    "kappa_serving_unified",    "Kappa 统一服务视图（历史回放 + 实时互补）"),
+    ("dws",    "kappa_daily_trend",        "Kappa 日级趋势视图（供历史分析图表）"),
+    ("dws",    "kappa_category_stats",     "Kappa 品类维度视图（历史 + 实时合并）"),
+    ("ads",    "kappa_current_totals",     "当前 GMV 汇总（Kappa 服务层快照）"),
+    # ── Kappa 监控层（回放进度 + 消费 Lag）──────────────────
+    ("stream", "kappa_replay_jobs",        "Kappa 历史回放任务记录"),
+    ("stream", "kappa_consumer_lag",       "Kafka 消费者 Lag 监控（实时 + 回放）"),
+    ("stream", "kappa_replay_status",      "Kappa 回放任务健康状态视图"),
     # ── AI 分析层 ────────────────────────────────────────────
-    ("stream", "ai_quality_alerts",        "AI 质检告警"),
+    ("stream", "ai_quality_alerts",        "AI 质检告警（Flink 内嵌 AI 质量门控）"),
     ("stream", "alert_investigations",     "AI 告警自动排查记录"),
     ("stream", "proactive_insights",       "AI 主动洞察（每5分钟）"),
-    ("stream", "etl_audit_log",           "ETL 审计日志"),
+    ("stream", "etl_audit_log",            "ETL 审计日志"),
 ]
 
 

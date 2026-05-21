@@ -252,35 +252,92 @@ def get_proactive_insights(limit: int = 5) -> str:
 
 
 @tool
-def get_lambda_status(days: int = 7) -> str:
+def get_kappa_status(hours: int = 24) -> str:
     """
-    查询 Lambda 架构批实时对账状态，对比离线层和实时层的数据一致性。
-    - days: 查询最近 N 天的对账记录（默认7天）
-    返回：每天的批处理量、实时量、差异百分比和一致性状态。
+    查询 Kappa 架构运行状态：流处理进度、Kafka lag、回放任务历史。
+    - hours: 查询最近 N 小时的 lag 监控记录（默认24小时）
+    返回：消费者 lag 趋势、当前是否有回放任务、最近回放历史。
     """
     try:
         ch = _get_ch()
-        df = ch.query_df(f"""
-            SELECT check_date, batch_order_cnt, stream_order_cnt,
-                   cnt_diff_pct, gmv_diff_pct, check_status
-            FROM stream.lambda_reconciliation
-            WHERE check_time >= now() - INTERVAL {days} DAY
-            ORDER BY check_date DESC
-            LIMIT 30
+
+        lag_df = ch.query_df(f"""
+            SELECT check_time, consumer_group, topic,
+                   lag, is_replay, throughput_per_s
+            FROM stream.kappa_consumer_lag
+            WHERE check_time >= now() - INTERVAL {hours} HOUR
+            ORDER BY check_time DESC
+            LIMIT 20
         """)
-        batch_total = ch.query(
-            "SELECT count(), sum(order_cnt) FROM dws.batch_daily_stats"
-        ).first_row
-        result = f"## Lambda 架构对账状态（最近 {days} 天）\n\n"
-        result += f"**离线层总量**：{batch_total[0]} 个分区，{batch_total[1]:,} 条订单\n\n"
-        if df.empty:
-            result += "暂无对账记录（reconciler 服务可能未启动）\n"
+
+        replay_df = ch.query_df("""
+            SELECT job_name, triggered_by, start_time, end_time,
+                   records_processed, status, elapsed_seconds, records_per_second
+            FROM stream.kappa_replay_status
+            LIMIT 10
+        """)
+
+        hourly_df = ch.query_df("""
+            SELECT count() AS covered_hours,
+                   min(hour_start) AS earliest,
+                   max(hour_start) AS latest,
+                   sum(order_cnt) AS total_orders,
+                   round(sum(total_gmv), 0) AS total_gmv
+            FROM dws.kappa_hourly_agg
+        """)
+
+        result = f"## Kappa 架构状态（最近 {hours} 小时）\n\n"
+        result += "### 历史聚合覆盖\n"
+        if not hourly_df.empty and hourly_df.iloc[0]['covered_hours'] > 0:
+            r = hourly_df.iloc[0]
+            result += (f"覆盖 {int(r['covered_hours'])} 小时，"
+                       f"{int(r['total_orders']):,} 条订单，"
+                       f"GMV R${float(r['total_gmv']):,.0f}\n"
+                       f"时间范围：{r['earliest']} ~ {r['latest']}\n\n")
         else:
-            result += df.to_markdown(index=False)
+            result += "暂无历史聚合数据（尚未执行回放）\n\n"
+
+        result += "### 消费者 Lag\n"
+        result += lag_df.to_markdown(index=False) if not lag_df.empty else "暂无 lag 记录\n"
+
+        result += "\n\n### 回放任务历史\n"
+        result += replay_df.to_markdown(index=False) if not replay_df.empty else "暂无回放任务\n"
+
         return result
     except Exception as e:
-        log.error('[get_lambda_status] 失败：%s', e)
-        return f'查询 Lambda 状态失败：{e}'
+        log.error('[get_kappa_status] 失败：%s', e)
+        return f'查询 Kappa 状态失败：{e}'
+
+
+@tool
+def trigger_kappa_replay(job_name: str = '') -> str:
+    """
+    触发 Kappa 架构 Flink 历史回放任务（AI Agent 调用，重算全量历史聚合）。
+    - job_name: 任务名称，为空则自动生成
+    返回：任务 ID 和预计耗时提示。
+    注意：实际回放由 flink-replay 服务执行，此工具写入任务触发记录。
+    """
+    import uuid
+    from datetime import datetime
+    try:
+        ch = _get_ch()
+        job_id   = str(uuid.uuid4())
+        job_name = job_name or f'ai_triggered_{datetime.now().strftime("%Y%m%dT%H%M%S")}'
+        ch.insert(
+            'stream.kappa_replay_jobs',
+            [[job_id, job_name, 'ai_agent', 'earliest', None, None,
+              datetime.now(), None, 0, 'pending', '', 'AI Agent 触发的历史重算']],
+            column_names=['job_id', 'job_name', 'triggered_by', 'from_offset',
+                          'replay_from_time', 'replay_until_time',
+                          'start_time', 'end_time', 'records_processed',
+                          'status', 'error_msg', 'notes'],
+        )
+        return (f"回放任务已创建：job_id={job_id[:8]}，job_name={job_name}\n"
+                f"状态 pending → flink-replay 服务将自动拾取并执行。\n"
+                f"使用 get_kappa_status 监控进度。")
+    except Exception as e:
+        log.error('[trigger_kappa_replay] 失败：%s', e)
+        return f'触发回放失败：{e}'
 
 
 @tool
@@ -315,4 +372,5 @@ def get_alert_investigations(limit: int = 10) -> str:
 
 ALL_TOOLS = [query_data, query_knowledge, detect_realtime_anomaly,
              generate_insight, get_etl_status, get_forecast,
-             get_proactive_insights, get_lambda_status, get_alert_investigations]
+             get_proactive_insights, get_kappa_status, trigger_kappa_replay,
+             get_alert_investigations]

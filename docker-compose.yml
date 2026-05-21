@@ -73,10 +73,12 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_LOG_RETENTION_HOURS: 24
-      KAFKA_LOG_SEGMENT_BYTES: 536870912    # 512MB per segment
-      KAFKA_NUM_PARTITIONS: 3               # 3分区提升并行度
+      KAFKA_LOG_RETENTION_HOURS: -1           # Kappa 架构：永久保留，日志即数据
+      KAFKA_LOG_RETENTION_BYTES: -1           # 不按大小限制（按磁盘容量规划）
+      KAFKA_LOG_SEGMENT_BYTES: 536870912      # 512MB per segment
+      KAFKA_NUM_PARTITIONS: 3                 # 3分区提升并行度
       KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG_CLEANUP_POLICY: delete        # 保留全量日志，不压缩（保留 offset 可回放）
       KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
     volumes:
       - kafka_data:/var/lib/kafka/data
@@ -142,33 +144,21 @@ services:
     command: python kafka/producer.py --mode scenario --rate 30
     <<: *restart-policy
 
-  # ─── Lambda 离线层：历史数据加载（一次性，90天×3万条=270万行）
-  batch-loader:
+  # ─── Kappa 回放服务：历史重算（按需手动触发或由 AI Agent 触发）
+  # 正常情况下 restart: "no"；需要重算历史时改为 restart: on-failure 触发一次
+  flink-replay:
     build: { context: ., dockerfile: Dockerfile.producer }
-    container_name: ai_dw_batch_loader
+    container_name: ai_dw_flink_replay
     networks: [backend]
     depends_on:
+      kafka:
+        condition: service_healthy
       clickhouse:
         condition: service_healthy
     environment:
       <<: *common-env
-    command: python batch/historical_loader.py --days 90 --daily-orders 30000
+    command: python flink/flink_stream_job.py --mode python --replay
     restart: "no"
-    volumes:
-      - .:/app
-
-  # ─── Lambda 批实时对账（每10分钟）────────────────────────
-  reconciler:
-    build: { context: ., dockerfile: Dockerfile.producer }
-    container_name: ai_dw_reconciler
-    networks: [backend]
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    environment:
-      <<: *common-env
-    command: python batch/reconciler.py --days 3 --loop 600
-    <<: *restart-policy
     volumes:
       - .:/app
 
