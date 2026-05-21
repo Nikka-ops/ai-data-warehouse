@@ -95,7 +95,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**导航**")
-    page = st.radio("", ["实时监控", "智能查询", "Agent 分析"], label_visibility="collapsed")
+    page = st.radio("", ["实时监控", "智能查询", "视图工坊", "Agent 分析"], label_visibility="collapsed")
 
     # ── 历史会话（仅在智能查询页显示）──────────────────────────
     if page == "智能查询":
@@ -177,12 +177,18 @@ if page == "实时监控":
     left, right = st.columns(2)
 
     with left:
-        st.subheader("订单量 & GMV 趋势（近60分钟）")
+        st.subheader("订单量 & GMV 趋势（近60分钟 + 预测）")
         df_trend = safe_query("""
             SELECT window_start, order_cnt, round(total_gmv, 0) AS total_gmv
             FROM dws.realtime_minute_stats
             WHERE window_start >= now() - INTERVAL 60 MINUTE
             ORDER BY window_start
+        """)
+        df_fc = safe_query("""
+            SELECT forecast_time, metric, predicted, lower_bound, upper_bound
+            FROM dws.realtime_forecast
+            WHERE forecast_time >= now()
+            ORDER BY forecast_time
         """)
         if not df_trend.empty:
             fig = go.Figure()
@@ -194,6 +200,22 @@ if page == "实时监控":
                 x=df_trend['window_start'], y=df_trend['total_gmv'],
                 name='GMV', line=dict(color='#F97316'), yaxis='y2'
             ))
+            # 预测叠加
+            if not df_fc.empty:
+                fc_order = df_fc[df_fc['metric'] == 'order_cnt']
+                if not fc_order.empty:
+                    fig.add_trace(go.Scatter(
+                        x=fc_order['forecast_time'], y=fc_order['predicted'],
+                        name='订单量预测', line=dict(color='#4C9BE8', dash='dash'),
+                        yaxis='y'
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=pd.concat([fc_order['forecast_time'], fc_order['forecast_time'].iloc[::-1]]),
+                        y=pd.concat([fc_order['upper_bound'], fc_order['lower_bound'].iloc[::-1]]),
+                        fill='toself', fillcolor='rgba(76,155,232,0.12)',
+                        line=dict(color='rgba(255,255,255,0)'),
+                        name='95%置信区间', yaxis='y', showlegend=True,
+                    ))
             fig.update_layout(
                 yaxis=dict(title='订单量', showgrid=False),
                 yaxis2=dict(title='GMV (R$)', overlaying='y', side='right'),
@@ -265,12 +287,35 @@ if page == "实时监控":
         st.markdown("---")
         st.subheader(f"⚠️ 近1小时告警（{len(df_alerts)} 条）")
         for _, row in df_alerts.iterrows():
-            color = 'red' if row['severity'] == 'HIGH' else 'orange'
             with st.expander(f"[{row['severity']}] {row['detail'][:60]}...", expanded=False):
                 st.markdown(f"**时间**：{row['alert_time']}")
                 st.markdown(f"**类型**：{row['alert_type']}")
                 st.markdown(f"**详情**：{row['detail']}")
                 st.markdown(f"**AI建议**：{row['ai_suggestion']}")
+
+    # ── AI 主动洞察面板 ───────────────────────────────────────
+    st.markdown("---")
+    insight_col, _ = st.columns([3, 1])
+    with insight_col:
+        st.subheader("🧠 AI 主动洞察（近3条）")
+    df_insights = safe_query("""
+        SELECT generated_at, insight_type, title, content, priority
+        FROM stream.proactive_insights
+        ORDER BY generated_at DESC LIMIT 3
+    """)
+    if df_insights.empty:
+        st.info("暂无主动洞察，洞察引擎每5分钟自动生成")
+    else:
+        _TYPE_ICON = {
+            'trend_up': '📈', 'trend_down': '📉',
+            'anomaly': '🚨', 'opportunity': '💰', 'summary': '📊',
+        }
+        for _, row in df_insights.iterrows():
+            icon = _TYPE_ICON.get(row['insight_type'], '💡')
+            ts = str(row['generated_at'])[:16]
+            with st.expander(f"{icon} {row['title']}  `{ts}`", expanded=True):
+                st.markdown(row['content'])
+                st.caption(f"类型：{row['insight_type']}  |  优先级：{row['priority']}")
 
     # 自动刷新
     if auto_refresh:
@@ -497,7 +542,71 @@ elif page == "智能查询":
 
 
 # ══════════════════════════════════════════════════════════════
-# 页面 3：Agent 分析
+# 页面 3：视图工坊（NL2DDL）
+# ══════════════════════════════════════════════════════════════
+elif page == "视图工坊":
+    st.title("🛠 视图工坊")
+    st.caption("用自然语言描述分析需求，AI 自动生成 CREATE VIEW DDL 并执行，视图注册到 ClickHouse")
+
+    tab_create, tab_list = st.tabs(["✨ 创建视图", "📋 已有视图"])
+
+    with tab_create:
+        st.markdown("**视图命名规则**：必须以 `ads.` 或 `dws.` 开头，AI 会自动遵守。")
+
+        examples_ddl = [
+            "统计每个卖家每小时的订单数和GMV，视图名 ads.seller_hourly_gmv",
+            "计算各品类的取消率（取消订单/总订单），视图名 ads.category_cancel_rate",
+            "按支付方式统计今日总支付额和平均分期数，视图名 ads.payment_type_summary",
+            "统计各州的实时平均价格和独立买家数，视图名 dws.realtime_state_stats",
+        ]
+        st.markdown("**快速示例**")
+        ex_cols = st.columns(2)
+        for i, ex in enumerate(examples_ddl):
+            if ex_cols[i % 2].button(ex[:40] + '...', key=f"ddl_ex_{i}", use_container_width=True):
+                st.session_state['ddl_pending'] = ex
+
+        desc = st.text_area(
+            "描述你的分析需求",
+            value=st.session_state.pop('ddl_pending', ''),
+            placeholder="例如：统计每个卖家每小时的 GMV 和订单量，视图名 ads.seller_hourly_gmv",
+            height=100,
+        )
+
+        if st.button("🚀 生成并创建视图", type="primary", disabled=not desc.strip()):
+            from ai_layer.nl2ddl import nl2ddl
+            with st.spinner("AI 生成 DDL 中..."):
+                result = nl2ddl(desc.strip())
+
+            if result['error']:
+                st.error(f"创建失败：{result['error']}")
+                if result.get('ddl'):
+                    with st.expander("查看生成的 DDL（未执行）"):
+                        st.code(result['ddl'], language='sql')
+            else:
+                st.success(f"视图 `{result['view_name']}` 创建成功！")
+                st.code(result['ddl'], language='sql')
+                st.info("视图已注册到 `stream.custom_views`，可在智能查询中直接使用。")
+
+    with tab_list:
+        st.markdown("**AI 创建的自定义视图**")
+        from ai_layer.nl2ddl import list_custom_views
+        views = list_custom_views()
+        if not views:
+            st.info("暂无自定义视图")
+        else:
+            for v in views:
+                ts = str(v['created_at'])[:16] if v.get('created_at') else ''
+                with st.expander(f"`{v['view_name']}`  {ts}"):
+                    if v.get('description'):
+                        st.markdown(f"**描述**：{v['description']}")
+                    st.caption("点击下方按钮在智能查询中使用此视图")
+                    if st.button(f"查询 {v['view_name']}", key=f"use_{v['view_name']}"):
+                        st.session_state['pending_question'] = f"查询 {v['view_name']} 最新数据"
+                        st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════
+# 页面 4：Agent 分析
 # ══════════════════════════════════════════════════════════════
 elif page == "Agent 分析":
     st.title("🤖 Agent 分析")

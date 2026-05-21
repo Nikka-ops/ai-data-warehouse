@@ -187,6 +187,40 @@ services:
     volumes:
       - .:/app
 
+  # ─── Forecaster（Holt双指数平滑，每分钟预测未来10分钟）────
+  forecaster:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: ai_dw_forecaster
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python ai_layer/forecaster.py --loop 60
+    restart: on-failure
+    volumes:
+      - .:/app
+
+  # ─── Insight Engine（主动洞察，每5分钟生成）──────────────
+  insight-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: ai_dw_insight_engine
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
+    command: python ai_layer/insight_engine.py --loop 300
+    restart: on-failure
+    volumes:
+      - .:/app
+
   # ─── Streamlit 看板 ───────────────────────────────────────
   dashboard:
     build:

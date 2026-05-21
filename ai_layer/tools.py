@@ -212,5 +212,62 @@ def get_etl_status(lookback_hours: int = 1) -> str:
         return f'查询 ETL 状态失败：{e}'
 
 
+@tool
+def get_forecast(metric: str = 'order_cnt', horizon: int = 10) -> str:
+    """
+    查询实时预测数据（Holt双指数平滑，预测未来N分钟）。
+    - metric: 预测指标，可选 order_cnt / total_gmv / avg_price
+    - horizon: 查询未来几分钟的预测（1~10，默认10）
+    返回：带置信区间的预测值表格。
+    """
+    if metric not in ('order_cnt', 'total_gmv', 'avg_price'):
+        return '错误：metric 只支持 order_cnt / total_gmv / avg_price'
+    horizon = max(1, min(10, int(horizon)))
+    try:
+        ch = _get_ch()
+        df = ch.query_df(f"""
+            SELECT forecast_time, metric, predicted, lower_bound, upper_bound, horizon
+            FROM dws.realtime_forecast
+            WHERE metric = '{metric}'
+              AND forecast_time >= now()
+              AND horizon <= {horizon}
+            ORDER BY forecast_time
+        """)
+        if df.empty:
+            return f'暂无 {metric} 的预测数据（预测服务可能尚未启动）'
+        return f"## {metric} 未来 {horizon} 分钟预测\n\n" + df.to_markdown(index=False)
+    except Exception as e:
+        log.error('[get_forecast] 失败：%s', e)
+        return f'查询预测失败：{e}'
+
+
+@tool
+def get_proactive_insights(limit: int = 5) -> str:
+    """
+    获取 AI 主动洞察引擎生成的最新数据洞察报告。
+    - limit: 返回最近几条洞察（默认5条）
+    返回：洞察标题、类型、内容列表（按时间倒序）。
+    """
+    limit = max(1, min(20, int(limit)))
+    try:
+        ch = _get_ch()
+        rows = ch.query(f"""
+            SELECT generated_at, insight_type, title, content
+            FROM stream.proactive_insights
+            ORDER BY generated_at DESC
+            LIMIT {limit}
+        """).result_rows
+        if not rows:
+            return '暂无主动洞察（洞察引擎可能尚未启动）'
+        lines = [f"## AI 主动洞察（最近 {len(rows)} 条）\n"]
+        for r in rows:
+            lines.append(f"**[{r[1]}] {r[2]}**  \n_{r[0]}_  \n{r[3]}\n")
+        return '\n---\n'.join(lines)
+    except Exception as e:
+        log.error('[get_proactive_insights] 失败：%s', e)
+        return f'查询洞察失败：{e}'
+
+
 ALL_TOOLS = [query_data, query_knowledge, detect_realtime_anomaly,
-             generate_insight, save_report, get_etl_status]
+             generate_insight, save_report, get_etl_status,
+             get_forecast, get_proactive_insights]
