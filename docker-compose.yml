@@ -172,7 +172,7 @@ services:
         condition: service_healthy
     environment:
       <<: *common-env
-    command: python ai_layer/alert_investigator.py --loop 60
+    command: python ai_layer/alert_investigator.py --loop 30
     <<: *restart-policy
     volumes:
       - .:/app

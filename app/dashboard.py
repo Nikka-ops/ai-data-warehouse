@@ -108,13 +108,40 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
+
+    # 侧边栏：实时告警处置状态角标
+    try:
+        import clickhouse_connect as _cc_sb
+        _ch_sb = _cc_sb.get_client(
+            host=cfg.ch_host, port=cfg.ch_port,
+            username=cfg.ch_user, password=cfg.ch_password,
+            connect_timeout=3, send_receive_timeout=5,
+        )
+        _cnt = _ch_sb.query(
+            "SELECT count() FROM stream.remediation_actions WHERE action_time >= now() - INTERVAL 1 HOUR"
+        ).first_row
+        _pend = _ch_sb.query(
+            "SELECT count() FROM stream.alert_unified WHERE alert_time >= now() - INTERVAL 10 MINUTE"
+        ).first_row
+        sb_handled = int(_cnt[0] or 0)
+        sb_pending = int(_pend[0] or 0)
+        if sb_pending > 0:
+            st.error(f"🚨 待处置告警 {sb_pending} 条")
+        elif sb_handled > 0:
+            st.success(f"✅ 近1小时已处置 {sb_handled} 条")
+        else:
+            st.success("✅ 无活跃告警")
+    except Exception:
+        pass
+
     st.caption("""
-**数据链路**
-Kafka → Flink → ClickHouse
+**Kappa 架构**
+Kafka（永久日志）→ Flink → ClickHouse
 ODS → DWD → DWS → ADS
 
 **AI 服务**
 • NL2SQL · RAG 知识库
+• 告警自动处置（30s轮询）
 • 预测（Holt平滑）
 • 主动洞察（5分钟）
 • AI ETL 质检
@@ -309,7 +336,7 @@ elif page == "🤖 Agent 分析":
     st.title("🤖 Agent 分析")
     st.caption("AI Agent 自主多步推理，调用 ClickHouse + 知识库 + 预测 + 洞察等工具")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["异常检测", "Kappa 回放", "AI 洞察", "自由分析"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["异常检测", "自动处置", "Kappa 回放", "AI 洞察", "自由分析"])
 
     with tab1:
         st.markdown("**实时异常检测（2σ基线法）+ AI 告警自动排查结论**")
@@ -329,6 +356,134 @@ elif page == "🤖 Agent 分析":
                     st.error(f"Agent 运行失败：{e}")
 
     with tab2:
+        st.markdown("**告警自动处置中心** — 检测、分析、修复、反馈全自动闭环")
+        st.caption("覆盖：数据质量告警 / Kappa 回放失败 / Kafka Lag 爆发 / ETL 质量劣化")
+
+        import clickhouse_connect as _cc2
+
+        # ── 顶部：处置统计 ───────────────────────────────────────
+        try:
+            _ch2 = _cc2.get_client(
+                host=cfg.ch_host, port=cfg.ch_port,
+                username=cfg.ch_user, password=cfg.ch_password,
+                connect_timeout=5, send_receive_timeout=15,
+            )
+            _stats = _ch2.query("""
+                SELECT
+                    countIf(final_status='resolved')   AS resolved,
+                    countIf(final_status='monitoring') AS monitoring,
+                    countIf(final_status='escalated')  AS escalated,
+                    countIf(action_success=1)          AS success_actions,
+                    count()                            AS total
+                FROM stream.remediation_actions
+                WHERE action_time >= now() - INTERVAL 24 HOUR
+            """).first_row
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("✅ 已修复", int(_stats[0] or 0), help="LLM 判断 resolved")
+            c2.metric("👁 监控中", int(_stats[1] or 0), help="已处置，观察恢复")
+            c3.metric("🚨 需人工", int(_stats[2] or 0), help="超出自动处理范围")
+            c4.metric("⚡ 动作执行成功率",
+                      f"{int(_stats[3] or 0)}/{int(_stats[4] or 0)}",
+                      help="近24小时 Playbook 成功次数")
+        except Exception as e:
+            st.warning(f"统计查询失败：{e}")
+
+        st.markdown("---")
+
+        # ── 实时处置记录 ─────────────────────────────────────────
+        col_feed, col_ctrl = st.columns([3, 1])
+
+        with col_ctrl:
+            st.markdown("**操作**")
+            if st.button("🔄 刷新", key="refresh_rem", use_container_width=True):
+                st.rerun()
+            if st.button("▶ AI 分析当前状态", key="rem_agent",
+                         type="primary", use_container_width=True):
+                from ai_layer.agents import run_anomaly_agent
+                with st.spinner("Agent 运行中..."):
+                    try:
+                        result = run_anomaly_agent()
+                        st.success("分析完成")
+                        st.write(result['output'])
+                        steps = result.get('intermediate_steps', [])
+                        with st.expander(f"推理步骤（{len(steps)} 步）"):
+                            for i, (action, obs) in enumerate(steps, 1):
+                                st.markdown(f"**{i}. {action.tool}**")
+                                st.code(str(obs)[:300])
+                    except Exception as e:
+                        st.error(f"Agent 失败：{e}")
+
+            st.markdown("---")
+            st.markdown("**告警类型**")
+            try:
+                _type_rows = _ch2.query("""
+                    SELECT alert_type, count() AS cnt
+                    FROM stream.remediation_actions
+                    WHERE action_time >= now() - INTERVAL 24 HOUR
+                    GROUP BY alert_type ORDER BY cnt DESC
+                """).result_rows
+                for r in _type_rows:
+                    st.caption(f"• {r[0]}：{r[1]} 次")
+            except Exception:
+                pass
+
+        with col_feed:
+            st.markdown("**近期处置记录（自动刷新）**")
+            try:
+                _rows = _ch2.query("""
+                    SELECT action_time, alert_type, alert_severity,
+                           action_type, root_cause, action_result,
+                           action_success, final_status, confidence
+                    FROM stream.remediation_dashboard
+                    LIMIT 20
+                """).result_rows
+
+                if not _rows:
+                    st.info("暂无处置记录（alert-investigator 服务每30秒巡检一次）")
+                else:
+                    for r in _rows:
+                        _status_color = {
+                            'resolved':  'success',
+                            'monitoring': 'warning',
+                            'escalated': 'error',
+                        }.get(str(r[7]), 'info')
+                        _icon = {'resolved': '✅', 'monitoring': '👁', 'escalated': '🚨'}.get(
+                            str(r[7]), '❓')
+                        _ok = '✓' if r[6] else '✗'
+                        with st.expander(
+                            f"{_icon} [{r[2]}] {r[1]}  `{str(r[3])}`  "
+                            f"`{str(r[0])[:16]}`",
+                            expanded=(str(r[7]) == 'escalated'),
+                        ):
+                            st.markdown(f"**根因**：{r[4]}")
+                            st.markdown(f"**动作**：`{r[3]}` {_ok}")
+                            st.markdown(f"**结果**：{r[5]}")
+                            st.caption(
+                                f"状态：{_icon} {r[7]} | "
+                                f"置信度：{float(r[8] or 0):.0%}"
+                            )
+            except Exception as e:
+                st.warning(f"查询失败：{e}")
+
+        # ── 系统告警原始记录 ─────────────────────────────────────
+        with st.expander("查看系统告警原始记录（stream.system_alerts）"):
+            try:
+                _sys = _ch2.query("""
+                    SELECT alert_time, alert_type, severity, title, handled
+                    FROM stream.system_alerts
+                    ORDER BY alert_time DESC LIMIT 20
+                """).result_rows
+                if _sys:
+                    import pandas as pd
+                    _df_sys = pd.DataFrame(_sys,
+                        columns=['时间', '类型', '级别', '摘要', '已处理'])
+                    st.dataframe(_df_sys, use_container_width=True, hide_index=True)
+                else:
+                    st.info("暂无系统告警记录")
+            except Exception as e:
+                st.warning(f"查询失败：{e}")
+
+    with tab3:
         st.markdown("**Kappa 架构：Flink 历史回放状态 + AI 驱动重算**")
         st.caption("单一流处理路径：Kafka（永久保留）→ Flink（实时 + 回放）→ ClickHouse")
 
@@ -394,7 +549,7 @@ elif page == "🤖 Agent 分析":
             except Exception as e:
                 st.warning(f"查询失败：{e}")
 
-    with tab3:
+    with tab4:
         st.markdown("**查看 AI 主动洞察引擎生成的最新洞察报告**")
 
         import clickhouse_connect
@@ -428,7 +583,7 @@ elif page == "🤖 Agent 分析":
         if st.button("🔄 刷新洞察", key="refresh_insight"):
             st.rerun()
 
-    with tab4:
+    with tab5:
         st.markdown("**输入任意分析目标，Agent 自主决定调用哪些工具、如何分析**")
         goal = st.text_area(
             "分析目标",

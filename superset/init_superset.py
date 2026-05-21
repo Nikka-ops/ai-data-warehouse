@@ -37,9 +37,14 @@ DATASETS = [
     ("stream", "kappa_replay_jobs",        "Kappa 历史回放任务记录"),
     ("stream", "kappa_consumer_lag",       "Kafka 消费者 Lag 监控（实时 + 回放）"),
     ("stream", "kappa_replay_status",      "Kappa 回放任务健康状态视图"),
+    # ── 告警自动处置层 ────────────────────────────────────────
+    ("stream", "ai_quality_alerts",        "数据质量告警（Flink 内嵌 AI 质量门控）"),
+    ("stream", "system_alerts",            "系统告警（Kappa 回放/Kafka Lag/ETL 劣化）"),
+    ("stream", "alert_unified",            "统一告警视图（数据质量 + 系统告警合并）"),
+    ("stream", "remediation_actions",      "告警自动处置审计（根因+动作+结果完整链路）"),
+    ("stream", "remediation_dashboard",    "处置记录看板视图（按时间倒序 Top50）"),
+    ("stream", "alert_investigations",     "AI 告警排查记录（历史兼容）"),
     # ── AI 分析层 ────────────────────────────────────────────
-    ("stream", "ai_quality_alerts",        "AI 质检告警（Flink 内嵌 AI 质量门控）"),
-    ("stream", "alert_investigations",     "AI 告警自动排查记录"),
     ("stream", "proactive_insights",       "AI 主动洞察（每5分钟）"),
     ("stream", "etl_audit_log",            "ETL 审计日志"),
 ]

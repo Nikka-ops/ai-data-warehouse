@@ -341,6 +341,40 @@ def trigger_kappa_replay(job_name: str = '') -> str:
 
 
 @tool
+def get_remediation_status(limit: int = 20) -> str:
+    """
+    查询告警自动处置系统的最新执行记录，了解系统已自动修复了哪些问题。
+    - limit: 返回最近 N 条处置记录（默认20）
+    返回：每条处置的告警类型、根因、执行动作、结果和最终状态。
+    """
+    limit = max(1, min(100, int(limit)))
+    try:
+        ch = _get_ch()
+        rows = ch.query(f"""
+            SELECT action_time, alert_type, alert_severity, action_type,
+                   root_cause, action_result, action_success, final_status, confidence
+            FROM stream.remediation_dashboard
+            LIMIT {limit}
+        """).result_rows
+        if not rows:
+            return '暂无处置记录（告警处置服务可能尚未启动）'
+        lines = [f"## 告警自动处置记录（最近 {len(rows)} 条）\n"]
+        for r in rows:
+            icon = '✅' if r[7] == 'resolved' else ('👁' if r[7] == 'monitoring' else '🚨')
+            ok   = '✓' if r[6] else '✗'
+            lines.append(
+                f"{icon} **[{r[2]}] {r[1]}** `{str(r[0])[:16]}`\n"
+                f"根因：{r[4]}\n"
+                f"动作：`{r[3]}` {ok} → {r[5][:80]}\n"
+                f"状态：`{r[7]}` | 置信度：{float(r[8] or 0):.0%}\n"
+            )
+        return '\n---\n'.join(lines)
+    except Exception as e:
+        log.error('[get_remediation_status] 失败：%s', e)
+        return f'查询处置记录失败：{e}'
+
+
+@tool
 def get_alert_investigations(limit: int = 10) -> str:
     """
     查询 AI 告警自动排查记录，了解近期告警的根因分析和处置结果。
@@ -373,4 +407,4 @@ def get_alert_investigations(limit: int = 10) -> str:
 ALL_TOOLS = [query_data, query_knowledge, detect_realtime_anomaly,
              generate_insight, get_etl_status, get_forecast,
              get_proactive_insights, get_kappa_status, trigger_kappa_replay,
-             get_alert_investigations]
+             get_remediation_status, get_alert_investigations]

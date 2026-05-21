@@ -12,7 +12,7 @@ from ai_layer.tools import (
     query_data, query_knowledge, detect_realtime_anomaly,
     generate_insight, get_etl_status, get_forecast,
     get_proactive_insights, get_kappa_status, trigger_kappa_replay,
-    get_alert_investigations,
+    get_remediation_status, get_alert_investigations,
     ALL_TOOLS,
 )
 
@@ -53,19 +53,19 @@ ANOMALY_SYSTEM = """你是实时数据监控专家，负责检测流式数据中
 3. 用 query_data 查当前最新5个分钟窗口：
    SELECT window_start, order_cnt, total_gmv, avg_price, top_category
    FROM dws.realtime_minute_stats ORDER BY window_start DESC LIMIT 5
-4. 用 query_data 查最新告警：
-   SELECT alert_time, severity, alert_type, detail
-   FROM stream.ai_quality_alerts ORDER BY alert_time DESC LIMIT 5
-5. 用 get_alert_investigations 查看 AI 已自动排查的告警结论
+4. 用 query_data 查最新告警（含系统告警）：
+   SELECT alert_time, severity, alert_type, category, title
+   FROM stream.alert_unified ORDER BY alert_time DESC LIMIT 10
+5. 用 get_remediation_status 查看系统自动处置情况（已执行了哪些修复动作）
 6. 用 get_forecast 查 order_cnt 预测趋势
 7. 用 generate_insight 综合以上结果生成异常分析
 
-输出：当前流量状态是否正常，已发现的异常，告警自动处置情况，预测走势。"""
+输出：当前流量状态是否正常，已发现的异常，系统自动处置了哪些问题（结果如何），预测走势。"""
 
 
 def run_anomaly_agent():
-    tools = [query_data, detect_realtime_anomaly, get_alert_investigations,
-             get_forecast, generate_insight]
+    tools = [query_data, detect_realtime_anomaly, get_remediation_status,
+             get_alert_investigations, get_forecast, generate_insight]
     log.info('启动实时异常检测 Agent')
     return _make_executor(tools, ANOMALY_SYSTEM, max_iter=10).invoke(
         {'input': '请对当前实时流数据进行全面异常检测，输出检测结论'}
