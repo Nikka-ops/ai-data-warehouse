@@ -1,5 +1,6 @@
 version: "3.8"
 
+# ── 公共环境变量 ──────────────────────────────────────────────
 x-common-env: &common-env
   CLICKHOUSE_HOST: clickhouse
   CLICKHOUSE_PORT: "8123"
@@ -12,33 +13,59 @@ x-common-env: &common-env
   KAFKA_FLINK_DWD_TOPIC: flink.realtime_dwd
   KAFKA_FLINK_ALERTS_TOPIC: flink.alerts
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+  LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+# ── 公共重启策略 ──────────────────────────────────────────────
+x-restart: &restart-policy
+  restart: on-failure
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+# ── 网络 ──────────────────────────────────────────────────────
+# frontend: 可被 Nginx 暴露的 Web 服务
+# backend:  数据/AI 内部服务，不对外暴露
+networks:
+  frontend:
+    name: ai_dw_frontend
+  backend:
+    name: ai_dw_backend
 
 services:
 
-  # ─── Zookeeper ────────────────────────────────────────────
+  # ════════════════════════════════════════════════════════════
+  # 基础设施层
+  # ════════════════════════════════════════════════════════════
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: ai_dw_zookeeper
+    networks: [backend]
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "2181"]
       interval: 10s
       timeout: 5s
       retries: 5
+    <<: *restart-policy
 
-  # ─── Kafka ────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: ai_dw_kafka
+    networks: [backend]
     depends_on:
       zookeeper:
         condition: service_healthy
-    ports:
-      - "9092:9092"
-      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -47,35 +74,40 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_SEGMENT_BYTES: 536870912    # 512MB per segment
+      KAFKA_NUM_PARTITIONS: 3               # 3分区提升并行度
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      - kafka_data:/var/lib/kafka/data
     healthcheck:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 15s
       timeout: 10s
       retries: 5
+    <<: *restart-policy
 
-  # ─── Kafka UI ─────────────────────────────────────────────
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: ai_dw_kafka_ui
+    networks: [frontend, backend]
     depends_on:
       kafka:
         condition: service_healthy
-    ports:
-      - "8090:8080"
     environment:
-      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_NAME: ai-dw-kafka
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    <<: *restart-policy
 
-  # ─── ClickHouse ────────────────────────────────────────────
   clickhouse:
     image: clickhouse/clickhouse-server:24.3
     container_name: ai_dw_clickhouse
-    ports:
-      - "8123:8123"
-      - "9000:9000"
+    networks: [backend]
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
       - ./clickhouse/init:/docker-entrypoint-initdb.d
+      - ./clickhouse/config:/etc/clickhouse-server/config.d   # 生产配置挂载
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
@@ -88,33 +120,38 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    <<: *restart-policy
 
-  # ─── Kafka 生产者（模拟实时订单流）──────────────────────
+  # ════════════════════════════════════════════════════════════
+  # 数据处理层（Kafka → Flink → ClickHouse）
+  # ════════════════════════════════════════════════════════════
+
   kafka-producer:
-    build:
-      context: .
-      dockerfile: Dockerfile.producer
+    build: { context: ., dockerfile: Dockerfile.producer }
     container_name: ai_dw_producer
+    networks: [backend]
     depends_on:
       kafka:
         condition: service_healthy
     environment:
       <<: *common-env
-    command: python kafka/producer.py --mode normal --rate 10
-    restart: on-failure
+    command: python kafka/producer.py --mode scenario
+    <<: *restart-policy
 
-  # ─── Flink JobManager ─────────────────────────────────────
   flink-jobmanager:
     image: flink:1.18-scala_2.12
     container_name: ai_dw_flink_jm
     command: jobmanager
+    networks: [frontend, backend]
     depends_on:
       kafka:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-    ports:
-      - "8081:8081"
     environment:
       <<: *common-env
       FLINK_PROPERTIES: |
@@ -123,6 +160,8 @@ services:
         parallelism.default: 2
         state.checkpoints.dir: file:///flink-checkpoints
         execution.checkpointing.interval: 60s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        rest.flamegraph.enabled: true
     volumes:
       - flink_checkpoints:/flink-checkpoints
       - .:/opt/flink/project
@@ -131,12 +170,13 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
+    <<: *restart-policy
 
-  # ─── Flink TaskManager ────────────────────────────────────
   flink-taskmanager:
     image: flink:1.18-scala_2.12
     container_name: ai_dw_flink_tm
     command: taskmanager
+    networks: [backend]
     depends_on:
       flink-jobmanager:
         condition: service_healthy
@@ -145,16 +185,16 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 2048m
     volumes:
       - flink_checkpoints:/flink-checkpoints
       - .:/opt/flink/project
+    <<: *restart-policy
 
-  # ─── Flink 作业（Python 模拟模式，无需 Java 编译）────────
   flink-job:
-    build:
-      context: .
-      dockerfile: Dockerfile.producer
+    build: { context: ., dockerfile: Dockerfile.producer }
     container_name: ai_dw_flink_job
+    networks: [backend]
     depends_on:
       kafka:
         condition: service_healthy
@@ -163,72 +203,59 @@ services:
     environment:
       <<: *common-env
     command: python flink/flink_stream_job.py --mode python
-    restart: on-failure
-    volumes:
-      - .:/app
+    <<: *restart-policy
 
-  # ─── AI ETL Agent ────────────────────────────────────────
+  # ════════════════════════════════════════════════════════════
+  # AI 服务层
+  # ════════════════════════════════════════════════════════════
+
   ai-etl:
-    build:
-      context: .
-      dockerfile: Dockerfile.producer
+    build: { context: ., dockerfile: Dockerfile.producer }
     container_name: ai_dw_etl_agent
+    networks: [backend]
     depends_on:
       clickhouse:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
     environment:
       <<: *common-env
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
     command: python ai_etl/ai_etl_agent.py --loop 60 --lookback 5
-    restart: on-failure
-    volumes:
-      - .:/app
+    <<: *restart-policy
 
-  # ─── Forecaster（Holt双指数平滑，每分钟预测未来10分钟）────
   forecaster:
-    build:
-      context: .
-      dockerfile: Dockerfile.producer
+    build: { context: ., dockerfile: Dockerfile.producer }
     container_name: ai_dw_forecaster
+    networks: [backend]
     depends_on:
       clickhouse:
         condition: service_healthy
     environment:
       <<: *common-env
     command: python ai_layer/forecaster.py --loop 60
-    restart: on-failure
-    volumes:
-      - .:/app
+    <<: *restart-policy
 
-  # ─── Insight Engine（主动洞察，每5分钟生成）──────────────
   insight-engine:
-    build:
-      context: .
-      dockerfile: Dockerfile.producer
+    build: { context: ., dockerfile: Dockerfile.producer }
     container_name: ai_dw_insight_engine
+    networks: [backend]
     depends_on:
       clickhouse:
         condition: service_healthy
     environment:
       <<: *common-env
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      LLM_MODEL: ${LLM_MODEL:-deepseek-chat}
     command: python ai_layer/insight_engine.py --loop 300
-    restart: on-failure
-    volumes:
-      - .:/app
+    <<: *restart-policy
 
-  # ─── Apache Superset（BI 工具，内置 ClickHouse 数据源）────
+  # ════════════════════════════════════════════════════════════
+  # 应用展示层
+  # ════════════════════════════════════════════════════════════
+
   superset:
-    build:
-      context: superset
-      dockerfile: Dockerfile
+    build: { context: superset, dockerfile: Dockerfile }
     container_name: ai_dw_superset
-    ports:
-      - "8088:8088"
+    networks: [frontend, backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-ai_dw_superset_secret_2024}
       SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-admin}
@@ -237,9 +264,6 @@ services:
     volumes:
       - superset_home:/app/superset_home
       - ./superset:/app/superset_custom
-    depends_on:
-      clickhouse:
-        condition: service_healthy
     command: >
       bash -c "
         superset db upgrade &&
@@ -249,8 +273,7 @@ services:
           --email admin@ai-dw.local
           --password $${SUPERSET_ADMIN_PASSWORD:-admin123} 2>/dev/null || true &&
         superset init &&
-        gunicorn -w 4 -b 0.0.0.0:8088
-          --timeout 120 --keep-alive 5
+        gunicorn -w 4 -b 0.0.0.0:8088 --timeout 120 --keep-alive 5
           'superset.app:create_app()'
       "
     healthcheck:
@@ -258,14 +281,15 @@ services:
       interval: 15s
       timeout: 10s
       retries: 10
-    restart: on-failure
+    <<: *restart-policy
 
-  # ─── Superset 初始化（配置 ClickHouse 数据源和数据集）────
   superset-init:
-    build:
-      context: superset
-      dockerfile: Dockerfile
+    build: { context: superset, dockerfile: Dockerfile }
     container_name: ai_dw_superset_init
+    networks: [frontend, backend]
+    depends_on:
+      superset:
+        condition: service_healthy
     environment:
       SUPERSET_URL: http://superset:8088
       SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-admin}
@@ -274,31 +298,106 @@ services:
       CLICKHOUSE_PORT: "8123"
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
-    depends_on:
-      superset:
-        condition: service_healthy
     command: python /app/superset_custom/init_superset.py
     restart: "no"
 
-
   dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile.dashboard
+    build: { context: ., dockerfile: Dockerfile.dashboard }
     container_name: ai_dw_dashboard
+    networks: [frontend, backend]
     depends_on:
       clickhouse:
         condition: service_healthy
-    ports:
-      - "8501:8501"
     environment:
       <<: *common-env
     volumes:
       - .:/app
     command: streamlit run app/dashboard.py --server.port 8501 --server.address 0.0.0.0
-    restart: on-failure
+    <<: *restart-policy
 
+  # ════════════════════════════════════════════════════════════
+  # 可观测性层（Prometheus + Grafana）
+  # ════════════════════════════════════════════════════════════
+
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: ai_dw_prometheus
+    networks: [frontend, backend]
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.route-prefix=/prometheus'
+      - '--web.external-url=http://localhost/prometheus'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    <<: *restart-policy
+
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: ai_dw_grafana
+    networks: [frontend, backend]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin123}
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_LOG_LEVEL: warn
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    <<: *restart-policy
+
+  # ════════════════════════════════════════════════════════════
+  # 网关层（Nginx 统一入口，仅此服务对外暴露端口）
+  # ════════════════════════════════════════════════════════════
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: ai_dw_nginx
+    networks: [frontend]
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - superset
+      - dashboard
+      - grafana
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    <<: *restart-policy
+
+# ── 数据卷 ────────────────────────────────────────────────────
 volumes:
   clickhouse_data:
+  clickhouse_logs:
+  zookeeper_data:
+  zookeeper_log:
+  kafka_data:
   flink_checkpoints:
   superset_home:
+  prometheus_data:
+  grafana_data:

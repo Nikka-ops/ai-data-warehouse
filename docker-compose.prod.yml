@@ -1,0 +1,100 @@
+# ============================================================
+# 生产环境覆盖配置
+# 使用方式：docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# ============================================================
+version: "3.8"
+
+services:
+
+  zookeeper:
+    mem_limit: 512m
+    cpus: '0.5'
+
+  kafka:
+    mem_limit: 2g
+    cpus: '1.0'
+    environment:
+      KAFKA_HEAP_OPTS: "-Xmx1g -Xms512m"
+      KAFKA_JVM_PERFORMANCE_OPTS: "-XX:+UseG1GC -XX:MaxGCPauseMillis=20"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 6              # 生产环境更多分区
+
+  clickhouse:
+    mem_limit: 8g
+    cpus: '4.0'
+
+  flink-jobmanager:
+    mem_limit: 1g
+    cpus: '1.0'
+
+  flink-taskmanager:
+    mem_limit: 4g
+    cpus: '2.0'
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 3584m
+        taskmanager.memory.managed.fraction: 0.4
+
+  flink-job:
+    mem_limit: 1g
+    cpus: '1.0'
+
+  kafka-producer:
+    mem_limit: 512m
+    cpus: '0.5'
+    command: python kafka/producer.py --mode scenario  # 生产用 scenario 模式
+
+  ai-etl:
+    mem_limit: 1g
+    cpus: '0.5'
+    environment:
+      LOG_LEVEL: WARNING
+
+  forecaster:
+    mem_limit: 512m
+    cpus: '0.25'
+
+  insight-engine:
+    mem_limit: 1g
+    cpus: '0.5'
+
+  superset:
+    mem_limit: 4g
+    cpus: '2.0'
+    command: >
+      bash -c "
+        superset db upgrade &&
+        superset fab create-admin
+          --username $${SUPERSET_ADMIN_USER:-admin}
+          --firstname Admin --lastname Admin
+          --email admin@ai-dw.local
+          --password $${SUPERSET_ADMIN_PASSWORD:-admin123} 2>/dev/null || true &&
+        superset init &&
+        gunicorn -w 8 -b 0.0.0.0:8088
+          --timeout 120 --keep-alive 5
+          --max-requests 1000 --max-requests-jitter 50
+          'superset.app:create_app()'
+      "
+
+  dashboard:
+    mem_limit: 2g
+    cpus: '1.0'
+    environment:
+      STREAMLIT_SERVER_MAX_UPLOAD_SIZE: 200
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+
+  prometheus:
+    mem_limit: 2g
+    cpus: '0.5'
+
+  grafana:
+    mem_limit: 1g
+    cpus: '0.5'
+
+  nginx:
+    mem_limit: 256m
+    cpus: '0.5'
