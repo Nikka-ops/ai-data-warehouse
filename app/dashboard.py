@@ -77,7 +77,7 @@ with st.sidebar:
 """, unsafe_allow_html=True)
 
     st.markdown("---")
-    page = st.radio("", ["💬 智能查询", "🤖 Agent 分析", "🗄️ 特征存储"], label_visibility="collapsed")
+    page = st.radio("", ["💬 智能查询", "🤖 Agent 分析", "🗄️ 特征存储", "📡 业务监控"], label_visibility="collapsed")
 
     if page == "💬 智能查询":
         st.markdown("---")
@@ -813,3 +813,173 @@ elif page == "🗄️ 特征存储":
                     st.success(f"训练集构建已提交（后台运行）：{result}")
                 except urllib.error.URLError as ex:
                     st.error(f"API 调用失败：{ex}（确保 feature-api 服务正常运行）")
+
+# ══════════════════════════════════════════════════════════════
+# 业务监控页
+# ══════════════════════════════════════════════════════════════
+elif page == "📡 业务监控":
+    st.title("📡 业务监控")
+    st.caption("业务指标告警 · 慢查询诊断 · 数据血缘图谱")
+
+    _m1, _m2, _m3, _m4 = st.tabs(["🚨 业务告警", "🐢 慢查询诊断", "🕸️ 数据血缘", "📊 报告记录"])
+
+    @st.cache_resource
+    def _mch():
+        import clickhouse_connect
+        return clickhouse_connect.get_client(
+            host=cfg.ch_host, port=cfg.ch_port,
+            username=cfg.ch_user, password=cfg.ch_password,
+            connect_timeout=10, send_receive_timeout=60,
+        )
+
+    # ── Tab1：业务告警 ────────────────────────────────────────
+    with _m1:
+        st.markdown("每5分钟检测 GMV、取消率、品类订单量，与昨日同期对比，异常时触发 LLM 根因分析。")
+        try:
+            rows = _mch().query("""
+                SELECT alert_time, metric_name, current_value, baseline_value,
+                       change_pct, severity, detail, root_cause, webhook_sent, resolved
+                FROM stream.business_alerts
+                ORDER BY alert_time DESC LIMIT 50
+            """).result_rows
+            if rows:
+                df_ba = pd.DataFrame(rows, columns=[
+                    "时间", "指标", "当前值", "基准值", "变化%", "严重度", "详情", "根因分析", "已推送", "已解决"
+                ])
+                active = df_ba[df_ba["已解决"] == 0]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("未处理告警", len(active))
+                c2.metric("CRITICAL", int((active["严重度"] == "CRITICAL").sum()))
+                c3.metric("已推送 Webhook", int(df_ba["已推送"].sum()))
+
+                st.markdown("**最近告警（按时间倒序）**")
+                for _, r in df_ba.head(20).iterrows():
+                    icon = "🔴" if r["严重度"] == "CRITICAL" else "🟡"
+                    status = "✅ 已解决" if r["已解决"] else "⏳ 待处理"
+                    with st.expander(f"{icon} {r['时间']} — {r['指标']}  {status}"):
+                        st.write(f"**当前值**：{r['当前值']:.2f}  **基准值**：{r['基准值']:.2f}  **变化**：{r['变化%']:+.1f}%")
+                        st.write(f"**详情**：{r['详情']}")
+                        st.info(f"💡 根因分析：{r['根因分析']}")
+            else:
+                st.success("暂无业务告警，系统运行正常 ✅")
+        except Exception as ex:
+            st.error(f"查询失败（确认 business-monitor 服务已启动）：{ex}")
+
+        if st.button("🔄 刷新告警", key="refresh_ba"):
+            st.rerun()
+
+    # ── Tab2：慢查询诊断 ──────────────────────────────────────
+    with _m2:
+        st.markdown("每30分钟扫描 `system.query_log`，LLM 自动给出优化建议。")
+        try:
+            rows = _mch().query("""
+                SELECT analyzed_at, query_time, duration_ms, category,
+                       suggestion, read_rows, read_bytes, query_sql
+                FROM stream.slow_query_analysis
+                ORDER BY analyzed_at DESC LIMIT 30
+            """).result_rows
+            if rows:
+                df_sq = pd.DataFrame(rows, columns=[
+                    "分析时间", "查询时间", "耗时(ms)", "类别", "优化建议", "读取行数", "读取字节", "SQL"
+                ])
+                c1, c2, c3 = st.columns(3)
+                c1.metric("慢查询总数", len(df_sq))
+                c2.metric("最慢查询(ms)", int(df_sq["耗时(ms)"].max()))
+                c3.metric("平均耗时(ms)", int(df_sq["耗时(ms)"].mean()))
+
+                cat_counts = df_sq["类别"].value_counts().reset_index()
+                cat_counts.columns = ["类别", "数量"]
+                fig = px.pie(cat_counts, names="类别", values="数量", title="慢查询分类分布")
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("**慢查询明细**")
+                for _, r in df_sq.iterrows():
+                    with st.expander(f"⏱️ {r['耗时(ms)']}ms — {r['类别']} — {str(r['查询时间'])[:19]}"):
+                        st.code(r["SQL"][:500], language="sql")
+                        st.success(f"💡 优化建议：{r['优化建议']}")
+                        st.caption(f"读取 {r['读取行数']:,} 行，{r['读取字节']/1024/1024:.1f} MB")
+            else:
+                st.info("暂无慢查询记录（阈值：执行时间 > 3秒）")
+        except Exception as ex:
+            st.error(f"查询失败：{ex}")
+
+    # ── Tab3：数据血缘 ────────────────────────────────────────
+    with _m3:
+        st.markdown("解析 ClickHouse 初始化 SQL 自动生成的表/视图依赖关系图。")
+        try:
+            from ai_layer.lineage import get_lineage, get_upstream, get_downstream, get_db_color
+            lineage = get_lineage()
+            nodes = lineage["nodes"]
+            edges = lineage["edges"]
+            colors = get_db_color()
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("表/视图总数", len(nodes))
+            c2.metric("依赖关系总数", len(edges))
+            c3.metric("涉及数据库", len(set(n.db for n in nodes)))
+
+            # 节点选择器——查上下游
+            node_names = sorted([n.name for n in nodes])
+            selected = st.selectbox("选择表/视图查看上下游依赖", ["（请选择）"] + node_names)
+            if selected and selected != "（请选择）":
+                ups = get_upstream(selected)
+                downs = get_downstream(selected)
+                col_u, col_d = st.columns(2)
+                with col_u:
+                    st.markdown(f"**⬆️ 上游（{len(ups)}个）**")
+                    for u in ups:
+                        st.write(f"- `{u}`")
+                    if not ups:
+                        st.caption("无上游（数据源头）")
+                with col_d:
+                    st.markdown(f"**⬇️ 下游（{len(downs)}个）**")
+                    for d in downs:
+                        st.write(f"- `{d}`")
+                    if not downs:
+                        st.caption("无下游（末端输出）")
+
+            st.markdown("---")
+            st.markdown("**全量依赖关系表**")
+            if edges:
+                df_edges = pd.DataFrame([
+                    {"上游": e.source, "下游": e.target, "关系类型": e.edge_type}
+                    for e in edges
+                ])
+                st.dataframe(df_edges, use_container_width=True, hide_index=True)
+
+            st.markdown("**节点列表**")
+            if nodes:
+                df_nodes = pd.DataFrame([
+                    {"表/视图": n.name, "数据库": n.db, "类型": n.node_type, "来源文件": n.source_file}
+                    for n in nodes
+                ])
+                db_filter = st.multiselect(
+                    "按数据库筛选",
+                    sorted(df_nodes["数据库"].unique()),
+                    default=sorted(df_nodes["数据库"].unique()),
+                )
+                st.dataframe(
+                    df_nodes[df_nodes["数据库"].isin(db_filter)],
+                    use_container_width=True, hide_index=True,
+                )
+        except Exception as ex:
+            st.error(f"血缘解析失败：{ex}")
+
+    # ── Tab4：报告记录 ────────────────────────────────────────
+    with _m4:
+        st.markdown("定时报告调度状态（日报每天09:00 · 周报每周一09:00）")
+        import glob
+        locks = glob.glob('/tmp/report_*.lock')
+        if locks:
+            st.success(f"已发送报告记录（{len(locks)} 条）：")
+            for lk in sorted(locks, reverse=True):
+                name = os.path.basename(lk).replace('.lock', '').replace('report_', '')
+                st.write(f"- ✅ {name}")
+        else:
+            st.info("暂无已发送报告（报告在每天/每周固定时间自动触发）")
+
+        webhook_url = os.getenv('WEBHOOK_URL', '')
+        if webhook_url:
+            st.success(f"Webhook 已配置：{webhook_url[:30]}...")
+        else:
+            st.warning("WEBHOOK_URL 未配置，报告只写入日志，不推送外部系统。在 .env 中设置 WEBHOOK_URL 即可启用推送。")
