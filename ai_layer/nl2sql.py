@@ -129,11 +129,27 @@ SYSTEM_PROMPT = """你是一位精通 ClickHouse SQL 的实时数据分析师。
 【表结构】
 {schema}
 
+{history_section}
 【输出要求】
 1. 只返回 SQL，不加任何解释
 2. 禁止 INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/TRUNCATE
 3. SQL 末尾不加分号
+4. 如果用户的问题是对上一轮的追问（如"再加一个字段"、"改成按州分组"），请在上一轮 SQL 基础上修改
 """
+
+
+def _format_nl2sql_history(history: list[dict]) -> str:
+    """将最近 N 轮对话格式化为 Prompt 片段"""
+    if not history:
+        return ''
+    lines = ['【对话历史（请结合上下文理解追问意图）】']
+    for turn in history[-3:]:  # 最多保留最近3轮
+        lines.append(f"用户问题：{turn['question']}")
+        lines.append(f"生成SQL：{turn['sql']}")
+        if turn.get('result_summary'):
+            lines.append(f"结果摘要：{turn['result_summary']}")
+        lines.append('')
+    return '\n'.join(lines) + '\n'
 
 INSIGHT_PROMPT = """你是实时数据分析师，根据以下实时查询结果给出3-5句业务洞察。
 问题：{question}
@@ -145,11 +161,14 @@ SQL：{sql}
 
 
 @llm_retry
-def generate_sql(question: str, schema: str) -> str:
+def generate_sql(question: str, schema: str, history: list[dict] | None = None) -> str:
+    history_section = _format_nl2sql_history(history or [])
     resp = llm.chat.completions.create(
         model=cfg.llm_model,
         messages=[
-            {'role': 'system', 'content': SYSTEM_PROMPT.format(schema=schema)},
+            {'role': 'system', 'content': SYSTEM_PROMPT.format(
+                schema=schema, history_section=history_section
+            )},
             {'role': 'user', 'content': question},
         ],
         temperature=cfg.nl2sql_temperature,
@@ -184,15 +203,31 @@ def validate_sql(sql: str):
         raise ValueError('SQL 必须以 SELECT 或 WITH 开头')
 
 
-def nl2sql(question: str, with_insight: bool = True) -> dict:
+def _make_result_summary(df: pd.DataFrame, max_len: int = 120) -> str:
+    """生成结果摘要供下一轮对话使用"""
+    if df.empty:
+        return '结果为空'
+    num_cols = df.select_dtypes(include='number').columns.tolist()
+    parts = [f'{len(df)} 行']
+    for col in num_cols[:2]:
+        parts.append(f'{col} 范围 {df[col].min():.1f}~{df[col].max():.1f}')
+    return '，'.join(parts)[:max_len]
+
+
+def nl2sql(question: str, with_insight: bool = True,
+           history: list[dict] | None = None) -> dict:
+    """
+    history 格式（每轮一个 dict）：
+      [{'question': str, 'sql': str, 'result_summary': str}, ...]
+    """
     result = {'question': question, 'sql': '', 'data': pd.DataFrame(),
-              'insight': '', 'row_count': 0, 'error': None}
+              'insight': '', 'row_count': 0, 'error': None, 'result_summary': ''}
     try:
         client = get_ch_client()
         schema = get_schema(client)
 
         log.info('[NL2SQL] %s', question)
-        sql = generate_sql(question, schema)
+        sql = generate_sql(question, schema, history=history)
         result['sql'] = sql
         log.info('[生成SQL] %s', sql)
 
@@ -200,6 +235,7 @@ def nl2sql(question: str, with_insight: bool = True) -> dict:
         df = client.query_df(sql)
         result['data'] = df
         result['row_count'] = len(df)
+        result['result_summary'] = _make_result_summary(df)
         log.info('[查询完成] %d 行', len(df))
 
         if with_insight and len(df) > 0:

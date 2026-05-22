@@ -1,0 +1,128 @@
+# =============================================================================
+# 文件：category_features.yaml
+# 描述：商品品类特征组定义（Category Stats Feature Group）
+#
+# 特征工程理念：
+#   品类维度特征从"商品供给侧"视角补充用户行为特征的不足：
+#   - 同一用户在不同品类的行为模式差异很大（如快消品 vs 3C 电子）；
+#   - 品类热度和价格趋势是实时推荐排序的重要上下文特征；
+#   - 品类取消率反映供给质量，与用户侧的 cancel_rate 相互印证。
+#
+# 典型使用场景：
+#   1. 推荐系统：user_behavior 特征 × category_stats 特征 → 召回 + 排序
+#   2. 动态定价：avg_price_7d 趋势 + gmv_share_today → 价格弹性评估
+#   3. 供应链预测：order_volume_1h 实时订单量 → 备货和物流调度
+#
+# 数据源：
+#   ods.orders_stream — 订单事件流
+#
+# 刷新策略：每2分钟刷新（*/2 * * * *），品类级聚合数据量较小，
+#   可比用户级特征更高频地刷新以捕获实时趋势。
+# =============================================================================
+
+feature_group: category_stats
+entity_key: product_category
+description: "商品品类特征组：品类维度的实时和历史统计"
+owner: "ai-dw"
+refresh_schedule: "*/2 * * * *"
+source_tables:
+  - ods.orders_stream
+
+features:
+  # ---------------------------------------------------------------------------
+  # 特征：order_volume_1h
+  # 类型：INT64（实时订单量）
+  # 业务含义：品类近1小时订单量，反映当前品类的热度和需求强度。
+  #   用于实时推荐系统的"热度加权"：高热度品类在排序时获得额外加权，
+  #   利用"羊群效应"提升平台整体转化率。
+  # 在线存储：TTL=300秒（5分钟），实时热度信号时效性极强。
+  # ---------------------------------------------------------------------------
+  - name: order_volume_1h
+    type: INT64
+    description: "品类近1小时订单量"
+    computation_sql: |
+      SELECT product_category AS entity_id,
+             toInt64(count()) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 1 HOUR
+      GROUP BY product_category
+    online_ttl: 300
+    default_value: "0"
+    max_staleness_seconds: 120
+    tags: ["realtime", "volume"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：avg_price_7d
+  # 类型：FLOAT64（价格类特征）
+  # 业务含义：品类近7天平均成交价格，反映品类的价格中枢和消费档次。
+  #   应用场景：
+  #   1. 价格异常检测：当日成交价显著偏离7天均价时触发告警
+  #   2. 个性化定价：根据品类均价和用户客单价（avg_order_price_30d）匹配
+  #   3. 搜索排序：价格区间过滤和排序的参考基准
+  # ---------------------------------------------------------------------------
+  - name: avg_price_7d
+    type: FLOAT64
+    description: "品类近7天平均价格"
+    computation_sql: |
+      SELECT product_category AS entity_id,
+             round(avg(price), 2) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 7 DAY
+      GROUP BY product_category
+    online_ttl: 3600
+    default_value: "0.0"
+    max_staleness_seconds: 1800
+    tags: ["pricing"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：cancel_rate_7d
+  # 类型：FLOAT64（品类风险特征）
+  # 业务含义：品类近7天取消率，从供给侧衡量品类的服务质量。
+  #   高取消率品类（>0.15）可能面临：商品质量问题、物流延误、图文不符等。
+  #   与 user_behavior.cancel_rate_30d 对比：
+  #   - 若用户取消率高但品类取消率低 → 该用户是高风险用户
+  #   - 若品类取消率高但用户取消率正常 → 该品类存在供给质量问题
+  # ---------------------------------------------------------------------------
+  - name: cancel_rate_7d
+    type: FLOAT64
+    description: "品类近7天取消率"
+    computation_sql: |
+      SELECT product_category AS entity_id,
+             round(countIf(order_status='canceled') / count(), 4) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 7 DAY
+      GROUP BY product_category
+    online_ttl: 3600
+    default_value: "0.0"
+    max_staleness_seconds: 1800
+    tags: ["risk"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：gmv_share_today
+  # 类型：FLOAT64（品类占比特征）
+  # 业务含义：品类今日 GMV 占平台总 GMV 的比例，反映品类的当日相对重要性。
+  #   应用场景：
+  #   1. 运营大盘监控：识别当日爆款品类，快速响应补货和流量调配
+  #   2. 推荐多样性控制：避免单一品类过度曝光（当占比 > 阈值时降权）
+  #   3. 广告竞价参考：高占比品类流量价值更高，可提高竞价底价
+  #   技术说明：使用窗口函数 sum(sum(price)) OVER () 计算全局总 GMV，
+  #   在 ClickHouse 中需确保同一查询内完成，避免分布式执行时的精度问题。
+  # 在线存储：TTL=600秒（10分钟），今日占比每隔几分钟更新一次即可。
+  # ---------------------------------------------------------------------------
+  - name: gmv_share_today
+    type: FLOAT64
+    description: "品类今日GMV占总GMV比例"
+    computation_sql: |
+      SELECT product_category AS entity_id,
+             round(sum(price) / sum(sum(price)) OVER (), 4) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= today()
+      GROUP BY product_category
+    online_ttl: 600
+    default_value: "0.0"
+    max_staleness_seconds: 300
+    tags: ["realtime", "share"]

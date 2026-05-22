@@ -1,0 +1,233 @@
+{
+  "title": "AI数仓 · 运维总览",
+  "uid": "ai-dw-overview",
+  "version": 1,
+  "schemaVersion": 38,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["ai-dw", "production"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "🗄 ClickHouse — 内存使用（RSS）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "ClickHouseAsyncMetrics_MemoryResident / 1024 / 1024 / 1024",
+        "legendFormat": "RSS (GB)",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "内存 GB",
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "⚡ ClickHouse — 并发查询数",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "ClickHouseMetrics_Query",
+          "legendFormat": "运行中查询",
+          "refId": "A"
+        },
+        {
+          "expr": "ClickHouseMetrics_BackgroundMergesAndMutationsPoolTask",
+          "legendFormat": "后台 Merge",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 3,
+      "title": "📥 ClickHouse — 写入行速率（行/秒）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "rate(ClickHouseProfileEvents_InsertedRows[1m])",
+        "legendFormat": "写入行/秒",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "displayName": "行/秒" }
+      }
+    },
+    {
+      "id": 4,
+      "title": "📤 ClickHouse — 读取行速率（行/秒）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "uid": "prometheus" },
+      "targets": [{
+        "expr": "rate(ClickHouseProfileEvents_SelectedRows[1m])",
+        "legendFormat": "读取行/秒",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 10,
+      "title": "📦 业务 — 订单量（分钟级，近60分钟）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "uid": "clickhouse" },
+      "targets": [{
+        "rawSql": "SELECT window_start AS time, order_cnt FROM dws.realtime_minute_stats WHERE window_start >= now() - INTERVAL 60 MINUTE ORDER BY window_start",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": { "displayName": "订单量/分钟", "unit": "short" }
+      }
+    },
+    {
+      "id": 11,
+      "title": "💰 业务 — GMV（分钟级，近60分钟）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "uid": "clickhouse" },
+      "targets": [{
+        "rawSql": "SELECT window_start AS time, round(total_gmv, 0) AS gmv FROM dws.realtime_minute_stats WHERE window_start >= INTERVAL 60 MINUTE ORDER BY window_start",
+        "format": "time_series",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": { "displayName": "GMV (R$)", "unit": "currencyUSD" }
+      }
+    },
+    {
+      "id": 20,
+      "title": "🚨 AI 告警 — 近1小时告警数",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 24 },
+      "datasource": { "uid": "clickhouse" },
+      "targets": [{
+        "rawSql": "SELECT count() AS alerts FROM stream.ai_quality_alerts WHERE alert_time >= now() - INTERVAL 1 HOUR",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "告警数",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "mappings": []
+        }
+      }
+    },
+    {
+      "id": 21,
+      "title": "🧠 AI 洞察 — 今日生成数",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 24 },
+      "datasource": { "uid": "clickhouse" },
+      "targets": [{
+        "rawSql": "SELECT count() AS insights FROM stream.proactive_insights WHERE generated_at >= today()",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "洞察数",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 22,
+      "title": "🔧 ETL Agent — 今日运行次数",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 24 },
+      "datasource": { "uid": "clickhouse" },
+      "targets": [{
+        "rawSql": "SELECT count() AS runs FROM stream.etl_audit_log WHERE run_time >= today()",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": { "displayName": "ETL运行次数" }
+      }
+    },
+    {
+      "id": 23,
+      "title": "📊 ETL Agent — 平均数据质量分",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 24 },
+      "datasource": { "uid": "clickhouse" },
+      "targets": [{
+        "rawSql": "SELECT round(avg(quality_score), 1) AS score FROM stream.etl_audit_log WHERE run_time >= today()",
+        "format": "table",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "质量分 (0-100)",
+          "min": 0, "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "green",  "value": 90 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 30,
+      "title": "🔮 AI 预测 vs 实际 — 订单量（近30分钟 + 预测10分钟）",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "uid": "clickhouse" },
+      "targets": [
+        {
+          "rawSql": "SELECT window_start AS time, order_cnt AS actual FROM dws.realtime_minute_stats WHERE window_start >= now() - INTERVAL 30 MINUTE ORDER BY window_start",
+          "legendFormat": "实际订单量",
+          "format": "time_series",
+          "refId": "A"
+        },
+        {
+          "rawSql": "SELECT forecast_time AS time, predicted FROM dws.realtime_forecast WHERE metric = 'order_cnt' AND forecast_time >= now() ORDER BY forecast_time",
+          "legendFormat": "预测订单量",
+          "format": "time_series",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": [{
+          "matcher": { "id": "byName", "options": "预测订单量" },
+          "properties": [{
+            "id": "custom.lineStyle",
+            "value": { "fill": "dash", "dash": [8, 4] }
+          }]
+        }]
+      }
+    }
+  ]
+}

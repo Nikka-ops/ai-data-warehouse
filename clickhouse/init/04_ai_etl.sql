@@ -41,3 +41,24 @@ CREATE TABLE IF NOT EXISTS stream.etl_audit_log (
 ) ENGINE = MergeTree()
 ORDER BY run_time
 TTL run_time + INTERVAL 30 DAY;
+
+
+-- ============================================================
+-- 多轮对话会话持久化表
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS stream.chat_sessions (
+    session_id     String,           -- 会话唯一ID（UUID）
+    session_name   String DEFAULT '', -- 用户自定义会话名（可选）
+    turn_index     UInt32,            -- 轮次序号（0起）
+    role           String,            -- user / assistant
+    msg_type       String DEFAULT '', -- nl2sql / rag / text
+    content        String DEFAULT '', -- 消息正文（问题或回答文本）
+    sql_text       String DEFAULT '', -- NL2SQL 生成的 SQL
+    result_summary String DEFAULT '', -- NL2SQL 结果摘要（供下轮历史注入）
+    sources        String DEFAULT '', -- RAG 来源文件（逗号分隔）
+    created_at     DateTime DEFAULT now()
+) ENGINE = MergeTree()
+ORDER BY (session_id, turn_index)
+TTL created_at + INTERVAL 7 DAY;  -- 会话记录保留7天
+

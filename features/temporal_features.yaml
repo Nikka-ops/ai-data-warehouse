@@ -1,0 +1,105 @@
+# =============================================================================
+# 文件：temporal_features.yaml
+# 描述：时间上下文特征组定义（Temporal Context Feature Group）
+#
+# 特征工程理念：
+#   时间上下文特征是"无状态特征"（Stateless Features）的典型代表：
+#   - 不依赖任何历史数据，仅基于请求发生的当前时刻计算
+#   - 无需 entity_id，全局共享同一组值（entity_id 固定为 "global"）
+#   - 计算成本极低，可直接在推理服务中实时计算，无需查询特征存储
+#
+# 为什么时间特征很重要？
+#   用户行为有强烈的时间周期性规律（Time-Series Seasonality）：
+#   - 午休时段（12-14点）：快餐、外卖类订单激增
+#   - 晚高峰（19-22点）：娱乐、服装类订单峰值
+#   - 周末：家居、亲子类订单明显高于工作日
+#   将时间特征与用户行为特征（user_behavior）交叉，
+#   可以捕获"特定用户在特定时段的行为模式"。
+#
+# 典型使用场景：
+#   1. CTR 预估：is_peak_hour × order_count_1h 联合判断爆发性需求
+#   2. 流失预测：is_weekend + days_since_last_order 识别长假后的流失风险
+#   3. 价格策略：高峰时段可适当提高动态定价系数
+#
+# refresh_schedule: "on_demand"
+#   时间特征无需预先写入 feature_store.feature_values，
+#   每次推理时直接通过 computation_sql 实时计算（纳秒级延迟）。
+#   这是 Feature Store 中"计算型特征"（Computed-on-the-fly）的设计模式。
+#
+# 数据源：无外部依赖，仅使用 ClickHouse 内置时间函数（now(), toHour() 等）
+# =============================================================================
+
+feature_group: temporal_context
+entity_key: event_hour
+description: "时间上下文特征组：请求时刻的时间特征（无需 entity_id 查询，直接计算）"
+owner: "ai-dw"
+refresh_schedule: "on_demand"
+source_tables: []
+
+features:
+  # ---------------------------------------------------------------------------
+  # 特征：hour_of_day
+  # 类型：INT64（周期性时间特征）
+  # 业务含义：当前小时数（0~23），用于捕获日内周期性模式（Intraday Seasonality）。
+  #   在模型中通常通过以下方式编码以保留周期性：
+  #   - 直接使用：适合树模型（XGBoost/LightGBM），可自动学习分段效果
+  #   - 正弦/余弦编码：sin(2π×hour/24), cos(2π×hour/24) → 适合神经网络
+  #   - One-Hot 编码：将24个小时作为独立特征 → 高维但精确
+  # online_ttl=60：每分钟更新一次（小时变化时自动失效）。
+  # ---------------------------------------------------------------------------
+  - name: hour_of_day
+    type: INT64
+    description: "当前小时（0-23）"
+    computation_sql: "SELECT 'global' AS entity_id, toInt64(toHour(now())) AS feature_value, now() AS feature_time"
+    online_ttl: 60
+    default_value: "12"
+    max_staleness_seconds: 60
+    tags: ["temporal", "context"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：is_peak_hour
+  # 类型：INT64（布尔类标志位，用0/1表示）
+  # 业务含义：是否处于业务高峰时段（电商行业经验定义）：
+  #   - 上午高峰：9点、10点、11点（上班后第一波购物冲动）
+  #   - 晚间高峰：19点、20点、21点、22点（下班后主要购物时段）
+  #   高峰时段特征组合应用：
+  #   - is_peak_hour=1 + order_volume_1h 高 → 正常热销，加大推荐曝光
+  #   - is_peak_hour=0 + order_count_1h 异常高 → 可疑刷单，触发风控
+  # 注意：高峰时段定义可根据业务数据驱动调整，
+  #   建议定期用 ClickHouse 分析 orders_stream 各小时订单量分布来验证。
+  # ---------------------------------------------------------------------------
+  - name: is_peak_hour
+    type: INT64
+    description: "是否高峰时段（9-11点 / 19-22点 = 1）"
+    computation_sql: |
+      SELECT 'global' AS entity_id,
+             toInt64(toHour(now()) IN (9,10,11,19,20,21,22)) AS feature_value,
+             now() AS feature_time
+    online_ttl: 60
+    default_value: "0"
+    max_staleness_seconds: 60
+    tags: ["temporal", "context"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：is_weekend
+  # 类型：INT64（布尔类标志位，用0/1表示）
+  # 业务含义：是否周末（周六=6，周日=7，ClickHouse 的 toDayOfWeek 从周一=1开始）。
+  #   周末效应（Weekend Effect）在电商数据中非常显著：
+  #   - 消费品类不同：工作日以通勤相关品类为主，周末以休闲娱乐为主
+  #   - 消费时段不同：周末高峰时段通常比工作日晚1~2小时
+  #   - 客单价更高：周末用户有更多时间浏览，冲动消费减少，理性消费增加
+  #   在流失预测模型中，"连续3个周末未下单"是强流失信号。
+  # online_ttl=3600：以小时为粒度缓存，周末状态在整天内不变。
+  # max_staleness_seconds=3600：每小时最多允许1小时陈旧（周内/周末切换时容忍）。
+  # ---------------------------------------------------------------------------
+  - name: is_weekend
+    type: INT64
+    description: "是否周末"
+    computation_sql: |
+      SELECT 'global' AS entity_id,
+             toInt64(toDayOfWeek(now()) IN (6,7)) AS feature_value,
+             now() AS feature_time
+    online_ttl: 3600
+    default_value: "0"
+    max_staleness_seconds: 3600
+    tags: ["temporal", "context"]

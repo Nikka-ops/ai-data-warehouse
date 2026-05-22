@@ -154,23 +154,6 @@ def generate_insight(context: str) -> str:
 
 
 @tool
-def save_report(title: str, content: str) -> str:
-    """将分析结果保存为 Markdown 报告文件。title=报告标题，content=正文（Markdown格式）。"""
-    try:
-        os.makedirs(cfg.reports_dir, exist_ok=True)
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        safe = re.sub(r'[\\/:*?"<>|]', '_', title)
-        path = os.path.join(cfg.reports_dir, f"{safe}_{ts}.md")
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(f"# {title}\n\n生成时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n\n---\n\n{content}")
-        log.info('[save_report] 已保存：%s', path)
-        return f'报告已保存：{path}'
-    except Exception as e:
-        log.error('[save_report] 失败：%s', e)
-        return f'保存失败：{e}'
-
-
-@tool
 def get_etl_status(lookback_hours: int = 1) -> str:
     """
     查询 AI ETL Agent 的最新运行状态和审计日志。
@@ -212,5 +195,314 @@ def get_etl_status(lookback_hours: int = 1) -> str:
         return f'查询 ETL 状态失败：{e}'
 
 
+@tool
+def get_forecast(metric: str = 'order_cnt', horizon: int = 10) -> str:
+    """
+    查询实时预测数据（Holt双指数平滑，预测未来N分钟）。
+    - metric: 预测指标，可选 order_cnt / total_gmv / avg_price
+    - horizon: 查询未来几分钟的预测（1~10，默认10）
+    返回：带置信区间的预测值表格。
+    """
+    if metric not in ('order_cnt', 'total_gmv', 'avg_price'):
+        return '错误：metric 只支持 order_cnt / total_gmv / avg_price'
+    horizon = max(1, min(10, int(horizon)))
+    try:
+        ch = _get_ch()
+        df = ch.query_df(f"""
+            SELECT forecast_time, metric, predicted, lower_bound, upper_bound, horizon
+            FROM dws.realtime_forecast
+            WHERE metric = '{metric}'
+              AND forecast_time >= now()
+              AND horizon <= {horizon}
+            ORDER BY forecast_time
+        """)
+        if df.empty:
+            return f'暂无 {metric} 的预测数据（预测服务可能尚未启动）'
+        return f"## {metric} 未来 {horizon} 分钟预测\n\n" + df.to_markdown(index=False)
+    except Exception as e:
+        log.error('[get_forecast] 失败：%s', e)
+        return f'查询预测失败：{e}'
+
+
+@tool
+def get_proactive_insights(limit: int = 5) -> str:
+    """
+    获取 AI 主动洞察引擎生成的最新数据洞察报告。
+    - limit: 返回最近几条洞察（默认5条）
+    返回：洞察标题、类型、内容列表（按时间倒序）。
+    """
+    limit = max(1, min(20, int(limit)))
+    try:
+        ch = _get_ch()
+        rows = ch.query(f"""
+            SELECT generated_at, insight_type, title, content
+            FROM stream.proactive_insights
+            ORDER BY generated_at DESC
+            LIMIT {limit}
+        """).result_rows
+        if not rows:
+            return '暂无主动洞察（洞察引擎可能尚未启动）'
+        lines = [f"## AI 主动洞察（最近 {len(rows)} 条）\n"]
+        for r in rows:
+            lines.append(f"**[{r[1]}] {r[2]}**  \n_{r[0]}_  \n{r[3]}\n")
+        return '\n---\n'.join(lines)
+    except Exception as e:
+        log.error('[get_proactive_insights] 失败：%s', e)
+        return f'查询洞察失败：{e}'
+
+
+@tool
+def get_kappa_status(hours: int = 24) -> str:
+    """
+    查询 Kappa 架构运行状态：流处理进度、Kafka lag、回放任务历史。
+    - hours: 查询最近 N 小时的 lag 监控记录（默认24小时）
+    返回：消费者 lag 趋势、当前是否有回放任务、最近回放历史。
+    """
+    try:
+        ch = _get_ch()
+
+        lag_df = ch.query_df(f"""
+            SELECT check_time, consumer_group, topic,
+                   lag, is_replay, throughput_per_s
+            FROM stream.kappa_consumer_lag
+            WHERE check_time >= now() - INTERVAL {hours} HOUR
+            ORDER BY check_time DESC
+            LIMIT 20
+        """)
+
+        replay_df = ch.query_df("""
+            SELECT job_name, triggered_by, start_time, end_time,
+                   records_processed, status, elapsed_seconds, records_per_second
+            FROM stream.kappa_replay_status
+            LIMIT 10
+        """)
+
+        hourly_df = ch.query_df("""
+            SELECT count() AS covered_hours,
+                   min(hour_start) AS earliest,
+                   max(hour_start) AS latest,
+                   sum(order_cnt) AS total_orders,
+                   round(sum(total_gmv), 0) AS total_gmv
+            FROM dws.kappa_hourly_agg
+        """)
+
+        result = f"## Kappa 架构状态（最近 {hours} 小时）\n\n"
+        result += "### 历史聚合覆盖\n"
+        if not hourly_df.empty and hourly_df.iloc[0]['covered_hours'] > 0:
+            r = hourly_df.iloc[0]
+            result += (f"覆盖 {int(r['covered_hours'])} 小时，"
+                       f"{int(r['total_orders']):,} 条订单，"
+                       f"GMV R${float(r['total_gmv']):,.0f}\n"
+                       f"时间范围：{r['earliest']} ~ {r['latest']}\n\n")
+        else:
+            result += "暂无历史聚合数据（尚未执行回放）\n\n"
+
+        result += "### 消费者 Lag\n"
+        result += lag_df.to_markdown(index=False) if not lag_df.empty else "暂无 lag 记录\n"
+
+        result += "\n\n### 回放任务历史\n"
+        result += replay_df.to_markdown(index=False) if not replay_df.empty else "暂无回放任务\n"
+
+        return result
+    except Exception as e:
+        log.error('[get_kappa_status] 失败：%s', e)
+        return f'查询 Kappa 状态失败：{e}'
+
+
+@tool
+def trigger_kappa_replay(job_name: str = '') -> str:
+    """
+    触发 Kappa 架构 Flink 历史回放任务（AI Agent 调用，重算全量历史聚合）。
+    - job_name: 任务名称，为空则自动生成
+    返回：任务 ID 和预计耗时提示。
+    注意：实际回放由 flink-replay 服务执行，此工具写入任务触发记录。
+    """
+    import uuid
+    from datetime import datetime
+    try:
+        ch = _get_ch()
+        job_id   = str(uuid.uuid4())
+        job_name = job_name or f'ai_triggered_{datetime.now().strftime("%Y%m%dT%H%M%S")}'
+        ch.insert(
+            'stream.kappa_replay_jobs',
+            [[job_id, job_name, 'ai_agent', 'earliest', None, None,
+              datetime.now(), None, 0, 'pending', '', 'AI Agent 触发的历史重算']],
+            column_names=['job_id', 'job_name', 'triggered_by', 'from_offset',
+                          'replay_from_time', 'replay_until_time',
+                          'start_time', 'end_time', 'records_processed',
+                          'status', 'error_msg', 'notes'],
+        )
+        return (f"回放任务已创建：job_id={job_id[:8]}，job_name={job_name}\n"
+                f"状态 pending → flink-replay 服务将自动拾取并执行。\n"
+                f"使用 get_kappa_status 监控进度。")
+    except Exception as e:
+        log.error('[trigger_kappa_replay] 失败：%s', e)
+        return f'触发回放失败：{e}'
+
+
+@tool
+def get_remediation_status(limit: int = 20) -> str:
+    """
+    查询告警自动处置系统的最新执行记录，了解系统已自动修复了哪些问题。
+    - limit: 返回最近 N 条处置记录（默认20）
+    返回：每条处置的告警类型、根因、执行动作、结果和最终状态。
+    """
+    limit = max(1, min(100, int(limit)))
+    try:
+        ch = _get_ch()
+        rows = ch.query(f"""
+            SELECT action_time, alert_type, alert_severity, action_type,
+                   root_cause, action_result, action_success, final_status, confidence
+            FROM stream.remediation_dashboard
+            LIMIT {limit}
+        """).result_rows
+        if not rows:
+            return '暂无处置记录（告警处置服务可能尚未启动）'
+        lines = [f"## 告警自动处置记录（最近 {len(rows)} 条）\n"]
+        for r in rows:
+            icon = '✅' if r[7] == 'resolved' else ('👁' if r[7] == 'monitoring' else '🚨')
+            ok   = '✓' if r[6] else '✗'
+            lines.append(
+                f"{icon} **[{r[2]}] {r[1]}** `{str(r[0])[:16]}`\n"
+                f"根因：{r[4]}\n"
+                f"动作：`{r[3]}` {ok} → {r[5][:80]}\n"
+                f"状态：`{r[7]}` | 置信度：{float(r[8] or 0):.0%}\n"
+            )
+        return '\n---\n'.join(lines)
+    except Exception as e:
+        log.error('[get_remediation_status] 失败：%s', e)
+        return f'查询处置记录失败：{e}'
+
+
+@tool
+def get_alert_investigations(limit: int = 10) -> str:
+    """
+    查询 AI 告警自动排查记录，了解近期告警的根因分析和处置结果。
+    - limit: 返回最近 N 条排查记录（默认10）
+    """
+    try:
+        ch = _get_ch()
+        rows = ch.query(f"""
+            SELECT investigation_time, alert_type, alert_severity,
+                   root_cause, impact_scope, auto_action, status, confidence
+            FROM stream.alert_investigations
+            ORDER BY investigation_time DESC
+            LIMIT {limit}
+        """).result_rows
+        if not rows:
+            return '暂无排查记录（告警排查服务可能未启动）'
+        lines = [f"## AI 告警排查记录（最近 {len(rows)} 条）\n"]
+        for r in rows:
+            lines.append(
+                f"**[{r[2]}] {r[1]}** `{str(r[0])[:16]}`  \n"
+                f"根因：{r[3]}  \n影响：{r[4]}  \n"
+                f"操作：{r[5]}  状态：`{r[7]}`  置信度：{float(r[8] or 0):.0%}\n"
+            )
+        return '\n---\n'.join(lines)
+    except Exception as e:
+        log.error('[get_alert_investigations] 失败：%s', e)
+        return f'查询排查记录失败：{e}'
+
+
+@tool
+def get_feature_status(group_name: str = '') -> str:
+    """
+    查询特征存储状态：特征组注册信息、新鲜度、漂移情况。
+    group_name 留空时返回所有特征组概览。
+    """
+    try:
+        ch = _get_ch()
+        if group_name:
+            rows = ch.query(f"""
+                SELECT feature_name, feature_type, online_ttl, max_staleness_seconds,
+                       is_active, updated_at
+                FROM feature_store.feature_definitions
+                WHERE group_name = '{group_name}' AND is_active = 1
+                ORDER BY feature_name
+            """).result_rows
+            if not rows:
+                return f'特征组 {group_name} 不存在或无激活特征'
+            lines = [f'**特征组：{group_name}**（{len(rows)} 个特征）\n']
+            for name, ftype, ttl, staleness, active, updated in rows:
+                lines.append(f'- {name}（{ftype}）TTL={ttl}s  最大陈旧={staleness}s')
+            drift_rows = ch.query(f"""
+                SELECT feature_name, psi_score, drift_detected, computed_at
+                FROM feature_store.drift_stats
+                WHERE group_name = '{group_name}'
+                ORDER BY computed_at DESC
+                LIMIT BY 1 BY feature_name
+            """).result_rows
+            if drift_rows:
+                lines.append('\n**漂移状态：**')
+                for fname, psi, drifted, ts in drift_rows:
+                    flag = '🔴 漂移' if drifted else '🟢 正常'
+                    lines.append(f'- {fname}：PSI={psi:.4f}  {flag}  @ {ts}')
+            return '\n'.join(lines)
+        else:
+            rows = ch.query("""
+                SELECT group_name, count() AS cnt,
+                       countIf(is_active=1) AS active_cnt,
+                       max(updated_at) AS last_update
+                FROM feature_store.feature_definitions
+                GROUP BY group_name
+                ORDER BY group_name
+            """).result_rows
+            if not rows:
+                return '特征注册表为空，请先运行 feature-init 服务'
+            lines = ['**特征存储概览：**\n']
+            for gname, cnt, active, last in rows:
+                lines.append(f'- {gname}：共 {cnt} 个特征，激活 {active} 个，最后更新 {last}')
+            return '\n'.join(lines)
+    except Exception as e:
+        log.error('[get_feature_status] 失败：%s', e)
+        return f'查询特征状态失败：{e}'
+
+
+@tool
+def query_feature_values(group_name: str, entity_ids: str, feature_names: str = '') -> str:
+    """
+    从特征存储离线层查询指定实体的特征值。
+    entity_ids：逗号分隔的实体ID列表（如 "user_001,user_002"）。
+    feature_names：逗号分隔的特征名（留空则查询该组所有特征）。
+    """
+    try:
+        ch = _get_ch()
+        ids = [e.strip() for e in entity_ids.split(',') if e.strip()]
+        if not ids:
+            return '错误：entity_ids 不能为空'
+        id_list = ', '.join(f"'{i}'" for i in ids[:20])
+        feat_filter = ''
+        if feature_names.strip():
+            feats = [f.strip() for f in feature_names.split(',') if f.strip()]
+            feat_list = ', '.join(f"'{f}'" for f in feats)
+            feat_filter = f"AND feature_name IN ({feat_list})"
+        rows = ch.query(f"""
+            SELECT entity_id, feature_name, feature_value_str, feature_time
+            FROM feature_store.feature_values
+            WHERE group_name = '{group_name}'
+              AND entity_id IN ({id_list})
+              {feat_filter}
+            ORDER BY entity_id, feature_name, computed_at DESC
+            LIMIT BY 1 BY (entity_id, feature_name)
+            LIMIT 200
+        """).result_rows
+        if not rows:
+            return f'未找到 {group_name} 中实体的特征值（共查询 {len(ids)} 个实体）'
+        lines = [f'**{group_name} 特征值（{len(rows)} 条）：**\n']
+        cur_entity = None
+        for eid, fname, val, ts in rows:
+            if eid != cur_entity:
+                lines.append(f'\n实体 {eid}：')
+                cur_entity = eid
+            lines.append(f'  {fname} = {val}  @ {ts}')
+        return '\n'.join(lines)
+    except Exception as e:
+        log.error('[query_feature_values] 失败：%s', e)
+        return f'查询特征值失败：{e}'
+
+
 ALL_TOOLS = [query_data, query_knowledge, detect_realtime_anomaly,
-             generate_insight, save_report, get_etl_status]
+             generate_insight, get_etl_status, get_forecast,
+             get_proactive_insights, get_kappa_status, trigger_kappa_replay,
+             get_remediation_status, get_alert_investigations,
+             get_feature_status, query_feature_values]
