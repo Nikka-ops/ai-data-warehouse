@@ -6,6 +6,8 @@ x-common-env: &common-env
   CLICKHOUSE_PORT: "8123"
   CLICKHOUSE_USER: ${CLICKHOUSE_USER:-admin}
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-admin123}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
   KAFKA_BOOTSTRAP_SERVERS: kafka:29092
   KAFKA_ORDERS_TOPIC: orders_stream
   KAFKA_PAYMENTS_TOPIC: payments_stream
@@ -40,6 +42,21 @@ services:
   # ════════════════════════════════════════════════════════════
   # 基础设施层
   # ════════════════════════════════════════════════════════════
+
+  # ─── Redis：在线特征存储（Feature Store 低延迟层）────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: ai_dw_redis
+    networks: [backend]
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    <<: *restart-policy
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -241,6 +258,82 @@ services:
     <<: *restart-policy
 
   # ════════════════════════════════════════════════════════════
+  # Feature Store 服务层
+  # ════════════════════════════════════════════════════════════
+
+  # ─── 特征注册与初始化（启动时运行一次）──────────────────────
+  feature-init:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_feature_init
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python -c "from feature_store.registry import FeatureRegistry; r=FeatureRegistry(); n=r.load_all(); print(f'已注册 {n} 个特征')"
+    restart: "no"
+    volumes:
+      - .:/app
+
+  # ─── 特征计算管道（每5分钟刷新所有特征）───────────────────
+  feature-pipeline:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_feature_pipeline
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python feature_store/pipeline.py --loop 300
+    <<: *restart-policy
+    volumes:
+      - .:/app
+
+  # ─── 特征漂移监控（每小时检查）─────────────────────────────
+  feature-drift:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_feature_drift
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python feature_store/drift_monitor.py --loop 3600
+    <<: *restart-policy
+    volumes:
+      - .:/app
+
+  # ─── 特征服务 API（FastAPI，在线特征读取）───────────────────
+  feature-api:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_feature_api
+    networks: [frontend, backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python api/feature_api.py
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    <<: *restart-policy
+    volumes:
+      - .:/app
+      - datasets_data:/app/datasets
+
+  # ════════════════════════════════════════════════════════════
   # AI 服务层
   # ════════════════════════════════════════════════════════════
 
@@ -436,3 +529,5 @@ volumes:
   superset_home:
   prometheus_data:
   grafana_data:
+  redis_data:
+  datasets_data:

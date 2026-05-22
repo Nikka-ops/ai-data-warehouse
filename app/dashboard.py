@@ -77,7 +77,7 @@ with st.sidebar:
 """, unsafe_allow_html=True)
 
     st.markdown("---")
-    page = st.radio("", ["💬 智能查询", "🤖 Agent 分析"], label_visibility="collapsed")
+    page = st.radio("", ["💬 智能查询", "🤖 Agent 分析", "🗄️ 特征存储"], label_visibility="collapsed")
 
     if page == "💬 智能查询":
         st.markdown("---")
@@ -604,3 +604,212 @@ elif page == "🤖 Agent 分析":
                             st.code(str(obs)[:400])
                 except Exception as e:
                     st.error(f"Agent 运行失败：{e}")
+
+# ══════════════════════════════════════════════════════════════
+# 特征存储页
+# ══════════════════════════════════════════════════════════════
+elif page == "🗄️ 特征存储":
+    st.title("🗄️ 特征存储（Feature Store）")
+    st.caption("特征注册、在线/离线查询、漂移监控、训练集构建")
+
+    _tab1, _tab2, _tab3, _tab4 = st.tabs(
+        ["📋 特征注册表", "🔍 在线查询", "📉 漂移监控", "🏗️ 训练集构建"]
+    )
+
+    @st.cache_resource
+    def _ch():
+        import clickhouse_connect
+        return clickhouse_connect.get_client(
+            host=cfg.ch_host, port=cfg.ch_port,
+            username=cfg.ch_user, password=cfg.ch_password,
+            connect_timeout=10, send_receive_timeout=60,
+        )
+
+    with _tab1:
+        st.markdown("所有已注册的特征组和特征定义（来自 `feature_store.feature_definitions`）")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            try:
+                rows = _ch().query("""
+                    SELECT group_name, count() AS total,
+                           countIf(is_active=1) AS active,
+                           max(updated_at) AS last_update
+                    FROM feature_store.feature_definitions
+                    GROUP BY group_name ORDER BY group_name
+                """).result_rows
+                if rows:
+                    df_groups = pd.DataFrame(rows, columns=["特征组", "总数", "激活", "最后更新"])
+                    st.dataframe(df_groups, use_container_width=True, hide_index=True)
+                else:
+                    st.info("特征注册表为空，请先运行 feature-init 服务加载 YAML 定义")
+            except Exception as ex:
+                st.error(f"查询失败：{ex}")
+        with col2:
+            st.metric("刷新频率", "每 5 分钟")
+            st.metric("存储引擎", "ClickHouse + Redis")
+            st.metric("架构", "Kappa 实时流")
+
+        st.markdown("---")
+        group_sel = st.selectbox(
+            "选择特征组查看详情",
+            ["user_behavior", "category_stats", "seller_stats"],
+            key="fs_group_sel",
+        )
+        if group_sel:
+            try:
+                detail = _ch().query(f"""
+                    SELECT feature_name, feature_type, description,
+                           online_ttl, max_staleness_seconds, default_value,
+                           arrayStringConcat(tags, ', ') AS tag_str
+                    FROM feature_store.feature_definitions
+                    WHERE group_name = '{group_sel}' AND is_active = 1
+                    ORDER BY feature_name
+                """).result_rows
+                if detail:
+                    df_d = pd.DataFrame(detail,
+                        columns=["特征名", "类型", "描述", "在线TTL(s)", "最大陈旧(s)", "默认值", "标签"])
+                    st.dataframe(df_d, use_container_width=True, hide_index=True)
+                else:
+                    st.info(f"{group_sel} 暂无激活特征")
+            except Exception as ex:
+                st.error(f"查询失败：{ex}")
+
+    with _tab2:
+        st.markdown("从离线 ClickHouse 读取实体特征值（在线 Redis 通过 feature-api 访问）")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            q_group = st.selectbox("特征组", ["user_behavior", "category_stats", "seller_stats"],
+                                   key="online_group")
+        with col_b:
+            q_entity = st.text_input("实体ID（逗号分隔，最多10个）",
+                                     placeholder="如：customer_abc,customer_xyz",
+                                     key="online_entity")
+
+        if st.button("🔍 查询特征", key="online_query", type="primary") and q_entity.strip():
+            ids = [e.strip() for e in q_entity.split(',') if e.strip()][:10]
+            id_list = ', '.join(f"'{i}'" for i in ids)
+            try:
+                rows = _ch().query(f"""
+                    SELECT entity_id, feature_name, feature_value_str,
+                           feature_time, computed_at
+                    FROM feature_store.feature_values
+                    WHERE group_name = '{q_group}'
+                      AND entity_id IN ({id_list})
+                    ORDER BY entity_id, feature_name, computed_at DESC
+                    LIMIT BY 1 BY (entity_id, feature_name)
+                """).result_rows
+                if rows:
+                    df_r = pd.DataFrame(rows,
+                        columns=["实体ID", "特征名", "特征值", "特征时间", "计算时间"])
+                    st.dataframe(df_r, use_container_width=True, hide_index=True)
+                    st.caption(f"共 {len(rows)} 条特征值（每实体×每特征取最新一条）")
+                else:
+                    st.warning("未找到特征值，请确认实体ID正确且 feature-pipeline 已运行")
+            except Exception as ex:
+                st.error(f"查询失败：{ex}")
+
+    with _tab3:
+        st.markdown("PSI（Population Stability Index）特征漂移检测，每小时运行")
+        st.caption("PSI < 0.10 稳定 | 0.10–0.25 监控 | > 0.25 漂移告警")
+
+        drift_group = st.selectbox("特征组", ["user_behavior", "category_stats", "seller_stats"],
+                                   key="drift_group")
+        try:
+            rows = _ch().query(f"""
+                SELECT feature_name, psi_score, drift_detected,
+                       mean, std, p50, p95, null_rate, computed_at
+                FROM feature_store.drift_stats
+                WHERE group_name = '{drift_group}'
+                ORDER BY computed_at DESC
+                LIMIT BY 1 BY feature_name
+            """).result_rows
+            if rows:
+                df_drift = pd.DataFrame(rows, columns=[
+                    "特征名", "PSI", "漂移", "均值", "标准差", "P50", "P95", "空值率", "检测时间"
+                ])
+                df_drift["状态"] = df_drift["漂移"].apply(lambda x: "🔴 漂移" if x else "🟢 正常")
+
+                col1, col2, col3 = st.columns(3)
+                n_drift = df_drift["漂移"].sum()
+                col1.metric("监控特征数", len(df_drift))
+                col2.metric("漂移特征数", int(n_drift), delta=None if n_drift == 0 else f"+{int(n_drift)}")
+                col3.metric("最高 PSI", f"{df_drift['PSI'].max():.4f}")
+
+                st.dataframe(
+                    df_drift[["特征名", "PSI", "状态", "均值", "标准差", "P50", "P95", "空值率", "检测时间"]],
+                    use_container_width=True, hide_index=True,
+                )
+
+                fig = px.bar(df_drift, x="特征名", y="PSI",
+                             color="状态",
+                             color_discrete_map={"🟢 正常": "#2ecc71", "🔴 漂移": "#e74c3c"},
+                             title=f"{drift_group} PSI 分布",
+                             text_auto=".4f")
+                fig.add_hline(y=0.10, line_dash="dot", line_color="orange",
+                              annotation_text="监控阈值(0.10)")
+                fig.add_hline(y=0.25, line_dash="dash", line_color="red",
+                              annotation_text="告警阈值(0.25)")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("暂无漂移统计数据，请等待 feature-drift 服务运行完成")
+        except Exception as ex:
+            st.error(f"查询失败：{ex}")
+
+    with _tab4:
+        st.markdown("通过 Point-in-Time（PIT）正确连接构建无数据泄漏的训练集")
+        st.caption("标签 SQL 返回 (entity_id, event_time, label)，ASOF JOIN 特征实现时间点对齐")
+
+        with st.expander("查看历史训练集", expanded=True):
+            try:
+                rows = _ch().query("""
+                    SELECT dataset_name, arrayStringConcat(feature_groups, ', ') AS groups,
+                           row_count, file_path, status, created_at
+                    FROM feature_store.training_datasets
+                    ORDER BY created_at DESC LIMIT 20
+                """).result_rows
+                if rows:
+                    df_ds = pd.DataFrame(rows,
+                        columns=["数据集名", "特征组", "行数", "文件路径", "状态", "创建时间"])
+                    st.dataframe(df_ds, use_container_width=True, hide_index=True)
+                else:
+                    st.info("暂无训练集记录")
+            except Exception as ex:
+                st.error(f"查询失败：{ex}")
+
+        st.markdown("---")
+        st.markdown("**通过 API 构建新训练集**")
+        ds_name = st.text_input("数据集名称", placeholder="如：churn_model_v1", key="ds_name")
+        label_sql = st.text_area(
+            "标签 SQL（需返回 entity_id, event_time, label 三列）",
+            placeholder="SELECT customer_id AS entity_id,\n       order_time AS event_time,\n       if(cancel_count > 0, 1, 0) AS label\nFROM ods.orders_stream\nWHERE event_time >= now() - INTERVAL 30 DAY",
+            height=120,
+            key="label_sql",
+        )
+        feat_groups = st.multiselect(
+            "选择特征组",
+            ["user_behavior", "category_stats", "seller_stats"],
+            default=["user_behavior"],
+            key="feat_groups",
+        )
+        if st.button("🏗️ 构建训练集（调用 API）", key="build_ds", type="primary"):
+            if not ds_name.strip() or not label_sql.strip() or not feat_groups:
+                st.warning("请填写数据集名称、标签 SQL，并选择至少一个特征组")
+            else:
+                import json, urllib.request, urllib.error
+                payload = json.dumps({
+                    "dataset_name": ds_name.strip(),
+                    "label_sql": label_sql.strip(),
+                    "feature_groups": feat_groups,
+                }).encode()
+                try:
+                    req = urllib.request.Request(
+                        "http://feature-api:8000/features/dataset/build",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        result = json.loads(resp.read())
+                    st.success(f"训练集构建已提交（后台运行）：{result}")
+                except urllib.error.URLError as ex:
+                    st.error(f"API 调用失败：{ex}（确保 feature-api 服务正常运行）")

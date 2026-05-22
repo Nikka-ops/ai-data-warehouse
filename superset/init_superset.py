@@ -47,6 +47,21 @@ DATASETS = [
     # ── AI 分析层 ────────────────────────────────────────────
     ("stream", "proactive_insights",       "AI 主动洞察（每5分钟）"),
     ("stream", "etl_audit_log",            "ETL 审计日志"),
+    # ── Feature Store ────────────────────────────────────────
+    ("feature_store", "feature_groups",      "特征组注册表（Feature Group Registry）"),
+    ("feature_store", "feature_definitions", "特征定义表（Feature Definitions，含计算SQL）"),
+    ("feature_store", "feature_values",      "特征值离线存储（Offline Feature Store）"),
+    ("feature_store", "feature_contracts",   "特征契约（默认值、SLA、陈旧阈值）"),
+    ("feature_store", "drift_stats",         "特征漂移统计（PSI + 分布统计）"),
+    ("feature_store", "training_datasets",   "训练集注册表（PIT 构建记录）"),
+    ("feature_store", "feature_freshness",   "特征新鲜度视图（实时陈旧检测）"),
+    ("feature_store", "feature_coverage",    "特征覆盖率视图（空值率统计）"),
+    # ── ML Metadata ──────────────────────────────────────────
+    ("ml_metadata", "experiments",           "ML 实验记录（超参、指标、状态）"),
+    ("ml_metadata", "model_feature_registry","模型-特征血缘注册（Feature Importance）"),
+    ("ml_metadata", "prediction_log",        "模型预测日志（在线/离线一致性校验）"),
+    ("ml_metadata", "model_performance",     "模型性能视图（最新指标汇总）"),
+    ("ml_metadata", "top_features",          "Top 特征视图（按 importance 排序）"),
 ]
 
 

@@ -1,0 +1,68 @@
+feature_group: seller_stats
+entity_key: seller_id
+description: 卖家特征组：卖家维度的经营指标和风险特征
+owner: ai-dw
+refresh_schedule: '*/10 * * * *'
+source_tables:
+  - ods.orders_stream
+
+features:
+  - name: gmv_7d
+    type: FLOAT64
+    description: 卖家近7天总销售额
+    computation_sql: |
+      SELECT seller_id AS entity_id,
+             round(sum(price), 2) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 7 DAY
+      GROUP BY seller_id
+    online_ttl: 3600
+    default_value: "0.0"
+    max_staleness_seconds: 1800
+    tags: [monetary]
+
+  - name: order_count_7d
+    type: INT64
+    description: 卖家近7天订单数
+    computation_sql: |
+      SELECT seller_id AS entity_id,
+             toInt64(count()) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 7 DAY
+      GROUP BY seller_id
+    online_ttl: 3600
+    default_value: "0"
+    max_staleness_seconds: 1800
+    tags: [volume]
+
+  - name: cancel_rate_30d
+    type: FLOAT64
+    description: 卖家近30天取消率（卖家质量指标）
+    computation_sql: |
+      SELECT seller_id AS entity_id,
+             round(countIf(order_status='canceled') / count(), 4) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 30 DAY
+      GROUP BY seller_id
+    online_ttl: 7200
+    default_value: "0.0"
+    max_staleness_seconds: 3600
+    tags: [risk, quality]
+
+  - name: unique_buyers_30d
+    type: INT64
+    description: 卖家近30天独立买家数（用户覆盖广度）
+    computation_sql: |
+      SELECT seller_id AS entity_id,
+             toInt64(count(DISTINCT customer_id)) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 30 DAY
+      GROUP BY seller_id
+    online_ttl: 7200
+    default_value: "0"
+    max_staleness_seconds: 3600
+    tags: [reach]

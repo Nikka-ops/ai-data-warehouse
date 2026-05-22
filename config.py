@@ -20,6 +20,10 @@ class _Config:
     ch_user: str     = field(default_factory=lambda: os.getenv('CLICKHOUSE_USER', 'admin'))
     ch_password: str = field(default_factory=lambda: os.getenv('CLICKHOUSE_PASSWORD', 'admin123'))
 
+    # ── Redis（在线特征存储）──────────────────────────────────
+    redis_host: str = field(default_factory=lambda: os.getenv('REDIS_HOST', 'localhost'))
+    redis_port: int = field(default_factory=lambda: int(os.getenv('REDIS_PORT', '6379')))
+
     # ── LLM ──────────────────────────────────────────────────
     api_key: str      = field(default_factory=lambda: os.getenv('DEEPSEEK_API_KEY', ''))
     api_base_url: str = field(default_factory=lambda: os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'))
@@ -48,6 +52,7 @@ class _Config:
     knowledge_dir: str = os.path.join(_BASE, 'knowledge_base')
     chroma_dir: str    = os.path.join(_BASE, 'chroma_db')
     reports_dir: str   = os.path.join(_BASE, 'reports')
+    datasets_dir: str  = os.path.join(_BASE, 'datasets')
 
 
 cfg = _Config()

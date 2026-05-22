@@ -404,7 +404,105 @@ def get_alert_investigations(limit: int = 10) -> str:
         return f'查询排查记录失败：{e}'
 
 
+@tool
+def get_feature_status(group_name: str = '') -> str:
+    """
+    查询特征存储状态：特征组注册信息、新鲜度、漂移情况。
+    group_name 留空时返回所有特征组概览。
+    """
+    try:
+        ch = _get_ch()
+        if group_name:
+            rows = ch.query(f"""
+                SELECT feature_name, feature_type, online_ttl, max_staleness_seconds,
+                       is_active, updated_at
+                FROM feature_store.feature_definitions
+                WHERE group_name = '{group_name}' AND is_active = 1
+                ORDER BY feature_name
+            """).result_rows
+            if not rows:
+                return f'特征组 {group_name} 不存在或无激活特征'
+            lines = [f'**特征组：{group_name}**（{len(rows)} 个特征）\n']
+            for name, ftype, ttl, staleness, active, updated in rows:
+                lines.append(f'- {name}（{ftype}）TTL={ttl}s  最大陈旧={staleness}s')
+            drift_rows = ch.query(f"""
+                SELECT feature_name, psi_score, drift_detected, computed_at
+                FROM feature_store.drift_stats
+                WHERE group_name = '{group_name}'
+                ORDER BY computed_at DESC
+                LIMIT BY 1 BY feature_name
+            """).result_rows
+            if drift_rows:
+                lines.append('\n**漂移状态：**')
+                for fname, psi, drifted, ts in drift_rows:
+                    flag = '🔴 漂移' if drifted else '🟢 正常'
+                    lines.append(f'- {fname}：PSI={psi:.4f}  {flag}  @ {ts}')
+            return '\n'.join(lines)
+        else:
+            rows = ch.query("""
+                SELECT group_name, count() AS cnt,
+                       countIf(is_active=1) AS active_cnt,
+                       max(updated_at) AS last_update
+                FROM feature_store.feature_definitions
+                GROUP BY group_name
+                ORDER BY group_name
+            """).result_rows
+            if not rows:
+                return '特征注册表为空，请先运行 feature-init 服务'
+            lines = ['**特征存储概览：**\n']
+            for gname, cnt, active, last in rows:
+                lines.append(f'- {gname}：共 {cnt} 个特征，激活 {active} 个，最后更新 {last}')
+            return '\n'.join(lines)
+    except Exception as e:
+        log.error('[get_feature_status] 失败：%s', e)
+        return f'查询特征状态失败：{e}'
+
+
+@tool
+def query_feature_values(group_name: str, entity_ids: str, feature_names: str = '') -> str:
+    """
+    从特征存储离线层查询指定实体的特征值。
+    entity_ids：逗号分隔的实体ID列表（如 "user_001,user_002"）。
+    feature_names：逗号分隔的特征名（留空则查询该组所有特征）。
+    """
+    try:
+        ch = _get_ch()
+        ids = [e.strip() for e in entity_ids.split(',') if e.strip()]
+        if not ids:
+            return '错误：entity_ids 不能为空'
+        id_list = ', '.join(f"'{i}'" for i in ids[:20])
+        feat_filter = ''
+        if feature_names.strip():
+            feats = [f.strip() for f in feature_names.split(',') if f.strip()]
+            feat_list = ', '.join(f"'{f}'" for f in feats)
+            feat_filter = f"AND feature_name IN ({feat_list})"
+        rows = ch.query(f"""
+            SELECT entity_id, feature_name, feature_value_str, feature_time
+            FROM feature_store.feature_values
+            WHERE group_name = '{group_name}'
+              AND entity_id IN ({id_list})
+              {feat_filter}
+            ORDER BY entity_id, feature_name, computed_at DESC
+            LIMIT BY 1 BY (entity_id, feature_name)
+            LIMIT 200
+        """).result_rows
+        if not rows:
+            return f'未找到 {group_name} 中实体的特征值（共查询 {len(ids)} 个实体）'
+        lines = [f'**{group_name} 特征值（{len(rows)} 条）：**\n']
+        cur_entity = None
+        for eid, fname, val, ts in rows:
+            if eid != cur_entity:
+                lines.append(f'\n实体 {eid}：')
+                cur_entity = eid
+            lines.append(f'  {fname} = {val}  @ {ts}')
+        return '\n'.join(lines)
+    except Exception as e:
+        log.error('[query_feature_values] 失败：%s', e)
+        return f'查询特征值失败：{e}'
+
+
 ALL_TOOLS = [query_data, query_knowledge, detect_realtime_anomaly,
              generate_insight, get_etl_status, get_forecast,
              get_proactive_insights, get_kappa_status, trigger_kappa_replay,
-             get_remediation_status, get_alert_investigations]
+             get_remediation_status, get_alert_investigations,
+             get_feature_status, query_feature_values]

@@ -26,6 +26,14 @@ kafka-python>=2.0.0
 streamlit>=1.33.0
 plotly>=5.0.0
 
+# ── Feature Store / Serving API ───────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+redis>=5.0.0
+pyyaml>=6.0.0
+pyarrow>=15.0.0
+scikit-learn>=1.4.0
+
 # ── 工具 ──────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 tenacity>=8.2.0

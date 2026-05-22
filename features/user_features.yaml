@@ -1,0 +1,168 @@
+# =============================================================================
+# 文件：user_features.yaml
+# 描述：用户行为特征组定义（User Behavior Feature Group）
+#
+# 特征工程理念：
+#   用户行为特征是电商推荐、风控和营销系统中最核心的特征集合。
+#   基于 RFM 模型（Recency-Frequency-Monetary）构建：
+#   - Recency（近期性）：days_since_last_order、order_count_1h
+#   - Frequency（频次）：order_count_7d
+#   - Monetary（价值）：gmv_7d、avg_order_price_30d
+#   额外补充风险维度：cancel_rate_30d（取消率，用于风控模型）
+#
+# 数据源：
+#   ods.orders_stream   — 订单事件流（Kafka → ClickHouse MaterializedView）
+#   ods.payments_stream — 支付事件流
+#
+# 特征刷新策略（Kappa 架构）：
+#   所有特征均基于流数据实时聚合，无需离线批处理。
+#   refresh_schedule="*/5 * * * *" 表示每5分钟触发一次增量计算，
+#   写入 feature_store.feature_values 供训练和推理使用。
+# =============================================================================
+
+feature_group: user_behavior
+entity_key: customer_id
+description: "用户行为特征组：基于历史订单流计算的用户级聚合特征"
+owner: "ai-dw"
+refresh_schedule: "*/5 * * * *"
+source_tables:
+  - ods.orders_stream
+  - ods.payments_stream
+
+features:
+  # ---------------------------------------------------------------------------
+  # 特征：order_count_7d
+  # 类型：INT64（频次类特征）
+  # 业务含义：衡量用户近7天的购买频率，是 RFM 中"F（频次）"的核心指标。
+  #   高值用户（>5单/周）通常是活跃买家，适合推送新品和促销。
+  # 在线存储：TTL=1800秒（30分钟），实时推荐场景下半小时内有效。
+  # ---------------------------------------------------------------------------
+  - name: order_count_7d
+    type: INT64
+    description: "近7天订单数"
+    computation_sql: |
+      SELECT customer_id AS entity_id,
+             toInt64(count()) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 7 DAY
+      GROUP BY customer_id
+    online_ttl: 1800
+    default_value: "0"
+    max_staleness_seconds: 600
+    tags: ["behavioral", "recency"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：gmv_7d
+  # 类型：FLOAT64（货币类特征）
+  # 业务含义：近7天消费总额，是 RFM 中"M（价值）"的短周期衡量指标。
+  #   用于用户价值分层（VIP/高潜/普通/休眠）和个性化定价策略。
+  #   注：price 字段为商品原价，不含运费（freight_value）。
+  # ---------------------------------------------------------------------------
+  - name: gmv_7d
+    type: FLOAT64
+    description: "近7天消费总额"
+    computation_sql: |
+      SELECT customer_id AS entity_id,
+             round(sum(price), 2) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 7 DAY
+      GROUP BY customer_id
+    online_ttl: 1800
+    default_value: "0.0"
+    max_staleness_seconds: 600
+    tags: ["monetary", "behavioral"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：cancel_rate_30d
+  # 类型：FLOAT64（比率类风险特征）
+  # 业务含义：近30天订单取消率，是交易风控和卖家评价体系的重要信号。
+  #   高取消率（>0.3）可能指示：用户体验差、欺诈行为或选品不匹配。
+  #   计算逻辑：countIf(status='canceled') / count(all orders)
+  # ---------------------------------------------------------------------------
+  - name: cancel_rate_30d
+    type: FLOAT64
+    description: "近30天取消率"
+    computation_sql: |
+      SELECT customer_id AS entity_id,
+             round(countIf(order_status='canceled') / count(), 4) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 30 DAY
+      GROUP BY customer_id
+    online_ttl: 3600
+    default_value: "0.0"
+    max_staleness_seconds: 1800
+    tags: ["risk", "behavioral"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：avg_order_price_30d
+  # 类型：FLOAT64（货币类特征）
+  # 业务含义：近30天平均客单价，反映用户的消费档次和偏好价格带。
+  #   与 gmv_7d 结合使用：高 GMV + 高客单价 = 高价值低频用户（精品客户）；
+  #                       高 GMV + 低客单价 = 高价值高频用户（促销敏感型）。
+  # ---------------------------------------------------------------------------
+  - name: avg_order_price_30d
+    type: FLOAT64
+    description: "近30天平均客单价"
+    computation_sql: |
+      SELECT customer_id AS entity_id,
+             round(avg(price), 2) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 30 DAY
+      GROUP BY customer_id
+    online_ttl: 3600
+    default_value: "0.0"
+    max_staleness_seconds: 1800
+    tags: ["monetary"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：days_since_last_order
+  # 类型：FLOAT64（时间衰减类特征）
+  # 业务含义：距最近一笔订单的天数，是 RFM 中"R（近期性）"的量化指标。
+  #   用于活跃度衰减建模：越小表示越活跃，越大表示越可能流失。
+  #   典型应用：流失预测模型（Churn Prediction）的核心输入特征。
+  #   默认值 999.0：新用户或无订单用户，表示"无限远的距离"。
+  #   注：使用小时精度后除以24，避免整数截断带来的精度损失。
+  # ---------------------------------------------------------------------------
+  - name: days_since_last_order
+    type: FLOAT64
+    description: "距最近一笔订单的天数（活跃度衰减指标）"
+    computation_sql: |
+      SELECT customer_id AS entity_id,
+             round(dateDiff('hour', max(event_time), now()) / 24.0, 2) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      GROUP BY customer_id
+    online_ttl: 3600
+    default_value: "999.0"
+    max_staleness_seconds: 3600
+    tags: ["recency"]
+
+  # ---------------------------------------------------------------------------
+  # 特征：order_count_1h
+  # 类型：INT64（实时特征）
+  # 业务含义：近1小时订单数，是实时风控和欺诈检测的关键特征。
+  #   短时间内大量下单（如 order_count_1h > 10）可能指示：
+  #   - 刷单行为（Fake Orders）
+  #   - 促销活动抢购（正常高频）
+  #   与 cancel_rate_30d 联合分析可区分以上两种情况。
+  # 在线存储：TTL=300秒（5分钟），实时特征有效窗口极短。
+  # max_staleness_seconds=120：2分钟内未更新则认为陈旧，触发重计算。
+  # ---------------------------------------------------------------------------
+  - name: order_count_1h
+    type: INT64
+    description: "近1小时订单数（实时特征）"
+    computation_sql: |
+      SELECT customer_id AS entity_id,
+             toInt64(count()) AS feature_value,
+             now() AS feature_time
+      FROM ods.orders_stream
+      WHERE event_time >= now() - INTERVAL 1 HOUR
+      GROUP BY customer_id
+    online_ttl: 300
+    default_value: "0"
+    max_staleness_seconds: 120
+    tags: ["realtime", "behavioral"]
