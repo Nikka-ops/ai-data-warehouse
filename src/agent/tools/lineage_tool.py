@@ -7,10 +7,11 @@ from langchain_core.tools import tool
 def get_table_lineage(table_name: str) -> str:
     """查询指定表的完整数据血缘（上游 + 下游）"""
     try:
-        import sys, os
+        import sys
+        import os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
-        from ai_layer.lineage import get_lineage
-        result = get_lineage()
+        from ai_layer.lineage import get_lineage as _get_lineage
+        result = _get_lineage()
         table_lower = table_name.lower()
         upstream = [e.source for e in result['edges'] if e.target == table_lower]
         downstream = [e.target for e in result['edges'] if e.source == table_lower]
@@ -27,9 +28,10 @@ def get_table_lineage(table_name: str) -> str:
 def get_impact_analysis(table_name: str) -> str:
     """分析指定表发生变化时对下游的影响范围"""
     try:
-        import sys, os
+        import sys
+        import os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
-        from ai_layer.lineage import get_downstream, get_lineage
+        from ai_layer.lineage import get_downstream
         downstream = get_downstream(table_name)
         # 递归查找二级下游
         second_level = []

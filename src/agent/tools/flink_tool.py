@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Flink 作业管理工具"""
-import urllib.request, json
+import urllib.request
+import json
 from langchain_core.tools import tool
 
 FLINK_API = "http://flink-jobmanager:8081"

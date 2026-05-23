@@ -7,7 +7,8 @@ from langchain_core.tools import tool
 def send_alert_notification(title: str, content: str, severity: str = "P3") -> str:
     """发送告警通知到配置的 Webhook（DingTalk/Feishu/Slack）"""
     try:
-        import sys, os
+        import sys
+        import os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
         from ai_layer.alert_engine.notifier import send_notification
         send_notification(title=title, content=content, severity=severity)
