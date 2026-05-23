@@ -1,3 +1,4 @@
+# 已整合到 alert_engine/rule_engine.py，此文件保留用于兼容旧接口
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
