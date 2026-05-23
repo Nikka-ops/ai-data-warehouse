@@ -7,7 +7,8 @@ from langchain_core.tools import tool
 try:
     from src.common.config import cfg
 except ImportError:
-    import sys, os
+    import sys
+    import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
     from config import cfg
 
