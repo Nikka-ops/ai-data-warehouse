@@ -1,0 +1,16 @@
+{
+  "nodes": [
+    {"id": "kafka.orders_stream",           "type": "kafka_topic", "name": "orders_stream"},
+    {"id": "ods.orders_stream",             "type": "table",       "name": "ods.orders_stream"},
+    {"id": "dwd.realtime_order_detail",     "type": "table",       "name": "dwd.realtime_order_detail"},
+    {"id": "dws.realtime_minute_stats",     "type": "table",       "name": "dws.realtime_minute_stats"},
+    {"id": "dws.kappa_hourly_agg",          "type": "table",       "name": "dws.kappa_hourly_agg"},
+    {"id": "ads.realtime_hourly",           "type": "view",        "name": "ads.realtime_hourly"}
+  ],
+  "edges": [
+    {"source": "kafka.orders_stream",       "target": "ods.orders_stream",         "type": "writes_to"},
+    {"source": "ods.orders_stream",         "target": "dwd.realtime_order_detail", "type": "derived_from"},
+    {"source": "dwd.realtime_order_detail", "target": "dws.realtime_minute_stats", "type": "derived_from"},
+    {"source": "dws.realtime_minute_stats", "target": "ads.realtime_hourly",       "type": "derived_from"}
+  ]
+}

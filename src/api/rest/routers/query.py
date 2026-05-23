@@ -1,0 +1,30 @@
+from fastapi import APIRouter, Depends, HTTPException
+from src.api.rest.schemas import QueryRequest, QueryResponse
+
+router = APIRouter(prefix="/query", tags=["查询"])
+
+@router.post("/nl2sql", response_model=QueryResponse)
+async def natural_language_query(req: QueryRequest):
+    """自然语言转 SQL 查询"""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
+    from ai_layer.nl2sql import nl2sql_query
+    result = nl2sql_query(req.question)
+    return QueryResponse(
+        sql=result.get("sql", ""),
+        data=result.get("data", []),
+        row_count=result.get("row_count", 0),
+        elapsed_ms=result.get("elapsed_ms", 0),
+        insight=result.get("insight", ""),
+        confidence=result.get("insight_confidence", 1.0),
+    )
+
+@router.post("/sql")
+async def raw_sql_query(sql: str):
+    """直接执行 SQL（仅 SELECT）"""
+    if not sql.strip().upper().startswith("SELECT"):
+        raise HTTPException(400, "只允许 SELECT 语句")
+    from src.api.rest.dependencies import get_ch_client
+    ch = get_ch_client()
+    result = ch.query(sql)
+    return {"data": result.result_rows, "columns": result.column_names}

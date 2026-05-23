@@ -1,0 +1,38 @@
+{
+  "orders": [
+    {
+      "order_id": "ord_001",
+      "customer_id": "cust_001",
+      "seller_id": "sell_001",
+      "category": "electronics",
+      "price": 299.99,
+      "quantity": 1,
+      "state": "SP",
+      "event_time": "2024-01-15T10:30:00Z"
+    },
+    {
+      "order_id": "ord_002",
+      "customer_id": "cust_002",
+      "seller_id": "sell_002",
+      "category": "fashion",
+      "price": 89.90,
+      "quantity": 2,
+      "state": "RJ",
+      "event_time": "2024-01-15T10:31:00Z"
+    }
+  ],
+  "expected_alerts": [
+    {
+      "source": "rule_engine",
+      "severity": "P1",
+      "category": "BUSINESS",
+      "metric_name": "order_cnt"
+    }
+  ],
+  "expected_lineage": {
+    "dws.realtime_minute_stats": {
+      "upstream": ["kafka.orders_stream", "ods.orders_stream"],
+      "downstream": ["ads.realtime_hourly"]
+    }
+  }
+}

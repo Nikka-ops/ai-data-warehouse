@@ -1,0 +1,6 @@
+# 默认所有文件
+* @nikka-ops
+
+# 核心 AI 层
+/src/agent/ @nikka-ops
+/src/api/ @nikka-ops
