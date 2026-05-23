@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Agent 工具定义（实时架构，唯一来源）"""
-import os, re, sys
+import os
+import re
+import sys
 from datetime import datetime
 import clickhouse_connect
 from langchain.tools import tool
@@ -318,7 +320,6 @@ def trigger_kappa_replay(job_name: str = '') -> str:
     注意：实际回放由 flink-replay 服务执行，此工具写入任务触发记录。
     """
     import uuid
-    from datetime import datetime
     try:
         ch = _get_ch()
         job_id   = str(uuid.uuid4())

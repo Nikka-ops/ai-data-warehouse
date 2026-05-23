@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """性能基准测试：NL2SQL、RAG、Agent 延迟和准确率"""
-import time, sys, statistics
+import time
+import sys
+import statistics
 sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 NL2SQL_CASES = [

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """NL2SQL 安全校验单元测试"""
 import pytest
-import sys, os
+import sys
 sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 # 测试 SQL 安全拦截
@@ -37,7 +37,7 @@ class TestSQLSecurity:
         assert is_safe_sql(sql), f"合法 SQL 不应被拦截: {sql}"
 
     def test_empty_sql_blocked(self):
-        assert not is_safe_sql("") or is_safe_sql("") == False or True  # 空SQL无害
+        assert not is_safe_sql("") or not is_safe_sql("") or True  # 空SQL无害
 
     def test_case_insensitive(self):
         assert not is_safe_sql("DROP table orders")

@@ -7,7 +7,6 @@ key 格式：feat:{entity_type}:{entity_id}
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from src.common.utils import get_logger
 from src.storage.redis.redis_config import get_redis_client

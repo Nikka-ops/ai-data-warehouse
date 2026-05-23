@@ -8,7 +8,6 @@ import sys
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 

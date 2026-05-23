@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 try:
-    import pandas as pd
+    import pandas as pd  # noqa: F401
     _PANDAS_AVAILABLE = True
 except ImportError:
     _PANDAS_AVAILABLE = False  # pandas 不可用时降级

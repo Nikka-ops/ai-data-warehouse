@@ -3,7 +3,9 @@
 会话管理器：将多轮对话历史持久化到 ClickHouse stream.chat_sessions。
 支持跨浏览器会话的上下文恢复。
 """
-import os, sys, uuid
+import os
+import sys
+import uuid
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

@@ -4,7 +4,10 @@
 Superset 自动初始化脚本
 等待 Superset 就绪后，通过 REST API 自动配置 ClickHouse 数据源和核心数据集。
 """
-import os, sys, time, json
+import os
+import sys
+import time
+import json
 import requests
 
 SUPERSET_URL = os.getenv("SUPERSET_URL", "http://localhost:8088")

@@ -14,9 +14,10 @@
       output_path="/tmp/dataset_cancel_risk_v1.parquet"
   )
 """
-import os, sys, json, uuid
+import os
+import sys
+import uuid
 from datetime import datetime
-from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
@@ -65,7 +66,6 @@ class DatasetBuilder:
         Returns:
             dict: {dataset_id, row_count, file_path, feature_columns, status}
         """
-        import pandas as pd
 
         dataset_id = str(uuid.uuid4())
         log.info('开始构建数据集 %s（id=%s）', dataset_name, dataset_id[:8])

@@ -1,5 +1,4 @@
 from pydantic import BaseModel, Field
-from typing import Any
 from datetime import datetime
 
 class QueryRequest(BaseModel):

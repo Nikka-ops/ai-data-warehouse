@@ -7,7 +7,7 @@ sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 def main():
     try:
-        from src.ingestion.producers.mock_producer import BrazilianEcommerceSimulator, KafkaProducer
+        from src.ingestion.producers.mock_producer import BrazilianEcommerceSimulator
     except ImportError:
         from kafka.producer import main as old_main
         old_main()
