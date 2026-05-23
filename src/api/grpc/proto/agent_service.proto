@@ -1,0 +1,24 @@
+syntax = "proto3";
+package aiwarehouse;
+
+service AgentService {
+    rpc RunAgent (AgentRequest) returns (AgentResponse);
+    rpc StreamAgent (AgentRequest) returns (stream AgentStep);
+}
+
+message AgentRequest {
+    string goal = 1;
+    string agent_type = 2;  // sql|alert|rag|diagnostic
+}
+
+message AgentResponse {
+    string output = 1;
+    repeated AgentStep steps = 2;
+    bool success = 3;
+}
+
+message AgentStep {
+    string agent = 1;
+    string action = 2;
+    string observation = 3;
+}

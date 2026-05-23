@@ -1,0 +1,25 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build Docker image
+      run: docker build -f Dockerfile -t ai-warehouse/agent:${{ github.sha }} .
+    - name: Build Flink image
+      run: docker build -f Dockerfile.flink -t ai-warehouse/flink:${{ github.sha }} .
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+    - uses: actions/checkout@v4
+    - name: Deploy to K8s
+      run: echo "Deploy to K8s cluster (configure kubeconfig secret)"

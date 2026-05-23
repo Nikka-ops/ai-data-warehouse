@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: ai-warehouse
+spec:
+  selector:
+    app: kafka
+  ports:
+  - name: client
+    port: 9092
+  - name: internal
+    port: 9093
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: ai-warehouse
+spec:
+  clusterIP: None
+  selector:
+    app: kafka
+  ports:
+  - name: client
+    port: 9092

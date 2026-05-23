@@ -1,0 +1,12 @@
+checkpoint:
+  interval_ms: 60000
+  mode: EXACTLY_ONCE
+  timeout_ms: 120000
+  min_pause_ms: 5000
+  max_concurrent: 1
+  externalize: RETAIN_ON_CANCELLATION
+state_backend:
+  type: rocksdb
+  incremental: true
+  checkpoint_dir: s3://warehouse/flink-checkpoints
+  savepoint_dir: s3://warehouse/flink-savepoints

@@ -1,0 +1,27 @@
+syntax = "proto3";
+package aiwarehouse;
+option java_package = "com.aiwarehouse.grpc";
+
+service QueryService {
+    rpc NL2SQL (QueryRequest) returns (QueryResponse);
+    rpc StreamQuery (QueryRequest) returns (stream QueryRow);
+}
+
+message QueryRequest {
+    string question = 1;
+    int32 max_rows = 2;
+    bool use_cache = 3;
+}
+
+message QueryResponse {
+    string sql = 1;
+    repeated QueryRow rows = 2;
+    int32 row_count = 3;
+    float elapsed_ms = 4;
+    string insight = 5;
+    float confidence = 6;
+}
+
+message QueryRow {
+    map<string, string> fields = 1;
+}
