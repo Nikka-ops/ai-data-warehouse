@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """SQL Agent：NL2SQL + Self-RAG 查询"""
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 from src.agent.core.base_agent import BaseAgent
 

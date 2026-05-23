@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """故障诊断 Agent：结合血缘 + 告警做根因分析"""
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 from src.agent.core.base_agent import BaseAgent
 

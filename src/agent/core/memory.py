@@ -2,7 +2,6 @@
 """短期（会话）+ 长期（ChromaDB）记忆管理"""
 import time
 from collections import deque
-from typing import Any
 
 class ShortTermMemory:
     """对话会话短期记忆（环形缓冲，最多保留 20 条）"""

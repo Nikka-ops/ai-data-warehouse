@@ -2,7 +2,6 @@
 """Agent 快速调用接口"""
 from src.agent.agents.sql_agent import SQLAgent
 from src.agent.agents.alert_agent import AlertAgent
-from src.agent.agents.rag_agent import RAGAgent
 
 _SQL_AGENT = None
 _ALERT_AGENT = None

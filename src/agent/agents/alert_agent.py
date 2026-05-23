@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Alert Agent：告警检测 + 自动诊断 + 修复"""
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 from src.agent.core.base_agent import BaseAgent
 

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """LangGraph Supervisor 多 Agent 协调器（重组自 ai_layer/agents.py）"""
-import os, sys, operator, json
-from typing import TypedDict, Annotated, Literal
+import os
+import sys
+import operator
+import json
+from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -11,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 
 # 兼容新旧导入路径
 try:
-    from src.agent.tools.clickhouse_tool import query_data, get_table_schema
+    from src.agent.tools.clickhouse_tool import query_data
     from src.agent.tools.kafka_tool import get_kafka_lag, list_kafka_topics
     from src.agent.tools.flink_tool import get_flink_jobs, get_flink_job_metrics, trigger_savepoint
     _NEW_TOOLS = True
