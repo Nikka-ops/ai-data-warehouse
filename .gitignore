@@ -43,3 +43,4 @@ logs/
 # Docker 数据卷
 clickhouse_data/
 airflow_logs/
+.claude/

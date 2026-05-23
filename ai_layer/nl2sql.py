@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
-"""NL2SQL：自然语言 → 实时 ClickHouse SQL"""
-import os, re, sys, time
+"""NL2SQL：自然语言 → 实时 ClickHouse SQL（Self-RAG 自我验证版）"""
+import json
+import os
+import re
+import sys
+import time
+
 import clickhouse_connect
 import pandas as pd
 from openai import OpenAI
@@ -137,6 +142,64 @@ SYSTEM_PROMPT = """你是一位精通 ClickHouse SQL 的实时数据分析师。
 4. 如果用户的问题是对上一轮的追问（如"再加一个字段"、"改成按州分组"），请在上一轮 SQL 基础上修改
 """
 
+REPAIR_PROMPT = """你是一位精通 ClickHouse SQL 的数据库专家。
+以下 SQL 在执行时产生了错误，请修复它。
+
+【用户原始问题】
+{question}
+
+【错误的 SQL】
+{bad_sql}
+
+【ClickHouse 报错信息】
+{error}
+
+【可用表结构】
+{schema}
+
+【修复要求】
+1. 只返回修复后的 SQL，不加任何解释
+2. 禁止 INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/TRUNCATE
+3. SQL 末尾不加分号
+4. 针对报错信息进行精准修复
+"""
+
+INSIGHT_PROMPT = """你是实时数据分析师，根据以下实时查询结果给出3-5句业务洞察。
+问题：{question}
+SQL：{sql}
+结果（前10行）：
+{data}
+要求：直接给出洞察，引用具体数字，说明实时业务状态，用中文。
+"""
+
+CONSERVATIVE_INSIGHT_PROMPT = """你是实时数据分析师，请严格根据以下查询结果给出3-5句保守的业务洞察。
+问题：{question}
+SQL：{sql}
+结果（前10行）：
+{data}
+【严格要求】
+- 只陈述数据中直接呈现的事实，不推测、不延伸
+- 每句话必须有数据支撑，不得引入结果之外的信息
+- 如数据量不足，直接说明，不要编造趋势判断
+- 用中文回答
+"""
+
+SCORE_INSIGHT_PROMPT = """你是数据分析质检专家，判断以下洞察是否完全基于查询结果，没有编造或推测结果之外的内容。
+
+【查询结果摘要】
+{data_summary}
+
+【待评估的洞察】
+{insight}
+
+评判标准：
+- 1.0：洞察完全来自数据，每个结论都有数据支撑
+- 0.7~0.9：大部分基于数据，有少量合理推断
+- 0.4~0.6：部分基于数据，存在明显推断或延伸
+- 0.0~0.3：大量编造，与数据严重不符
+
+只输出一个 0 到 1 之间的小数，不要输出其他任何内容。"""
+
 
 def _format_nl2sql_history(history: list[dict]) -> str:
     """将最近 N 轮对话格式化为 Prompt 片段"""
@@ -151,13 +214,14 @@ def _format_nl2sql_history(history: list[dict]) -> str:
         lines.append('')
     return '\n'.join(lines) + '\n'
 
-INSIGHT_PROMPT = """你是实时数据分析师，根据以下实时查询结果给出3-5句业务洞察。
-问题：{question}
-SQL：{sql}
-结果（前10行）：
-{data}
-要求：直接给出洞察，引用具体数字，说明实时业务状态，用中文。
-"""
+
+def _clean_sql(raw: str) -> str:
+    """清除 LLM 返回的 SQL 中的代码块标记"""
+    sql = raw.strip()
+    sql = re.sub(r'^```sql\s*', '', sql, flags=re.IGNORECASE)
+    sql = re.sub(r'^```\s*', '', sql)
+    sql = re.sub(r'\s*```$', '', sql)
+    return sql.strip().rstrip(';')
 
 
 @llm_retry
@@ -174,18 +238,16 @@ def generate_sql(question: str, schema: str, history: list[dict] | None = None) 
         temperature=cfg.nl2sql_temperature,
         max_tokens=800,
     )
-    sql = resp.choices[0].message.content.strip()
-    sql = re.sub(r'^```sql\s*', '', sql, flags=re.IGNORECASE)
-    sql = re.sub(r'^```\s*', '', sql)
-    sql = re.sub(r'\s*```$', '', sql)
-    return sql.strip().rstrip(';')
+    return _clean_sql(resp.choices[0].message.content)
 
 
 @llm_retry
-def generate_insight(question: str, sql: str, df: pd.DataFrame) -> str:
+def generate_insight(question: str, sql: str, df: pd.DataFrame,
+                     conservative: bool = False) -> str:
+    prompt_tpl = CONSERVATIVE_INSIGHT_PROMPT if conservative else INSIGHT_PROMPT
     resp = llm.chat.completions.create(
         model=cfg.llm_model,
-        messages=[{'role': 'user', 'content': INSIGHT_PROMPT.format(
+        messages=[{'role': 'user', 'content': prompt_tpl.format(
             question=question, sql=sql, data=df.head(10).to_markdown(index=False)
         )}],
         temperature=cfg.insight_temperature,
@@ -214,32 +276,170 @@ def _make_result_summary(df: pd.DataFrame, max_len: int = 120) -> str:
     return '，'.join(parts)[:max_len]
 
 
+# ── Self-RAG 核心辅助函数 ──────────────────────────────────────
+
+def _explain_sql(ch, sql: str) -> tuple[bool, str]:
+    """用 EXPLAIN SYNTAX 验证 SQL，返回 (is_valid, error_msg)。"""
+    try:
+        ch.command(f"EXPLAIN SYNTAX {sql}")
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _repair_sql(original_q: str, bad_sql: str, error: str, schema: str) -> str:
+    """让 LLM 修复错误的 SQL，返回修复后的 SQL。"""
+    try:
+        resp = llm.chat.completions.create(
+            model=cfg.llm_model,
+            messages=[
+                {'role': 'user', 'content': REPAIR_PROMPT.format(
+                    question=original_q,
+                    bad_sql=bad_sql,
+                    error=error,
+                    schema=schema,
+                )},
+            ],
+            temperature=cfg.nl2sql_temperature,
+            max_tokens=800,
+        )
+        return _clean_sql(resp.choices[0].message.content)
+    except Exception as e:
+        log.error('[SQL修复] LLM 调用失败：%s', e)
+        return bad_sql  # 降级：返回原始错误 SQL
+
+
+def _score_insight(insight: str, data_summary: str) -> float:
+    """自评置信分：0-1，判断洞察是否基于查询结果。LLM 失败时降级返回 0.5。"""
+    try:
+        resp = llm.chat.completions.create(
+            model=cfg.llm_model,
+            messages=[
+                {'role': 'user', 'content': SCORE_INSIGHT_PROMPT.format(
+                    data_summary=data_summary,
+                    insight=insight,
+                )},
+            ],
+            temperature=0,
+            max_tokens=10,
+        )
+        raw = resp.choices[0].message.content.strip()
+        score = float(re.search(r'[0-9]*\.?[0-9]+', raw).group())
+        score = max(0.0, min(1.0, score))
+        log.info('[洞察评分] %.2f', score)
+        return score
+    except Exception as e:
+        log.warning('[洞察评分] 评分失败，降级为 0.5：%s', e)
+        return 0.5
+
+
+# ── 对外接口 ──────────────────────────────────────────────────
+
+def get_schema_context() -> str:
+    """返回当前 Schema 上下文字符串（兼容外部模块调用）。"""
+    return get_schema()
+
+
 def nl2sql(question: str, with_insight: bool = True,
-           history: list[dict] | None = None) -> dict:
+           history: list[dict] | None = None,
+           session_id: str | None = None) -> dict:
     """
+    Self-RAG NL2SQL 主入口。
+
     history 格式（每轮一个 dict）：
       [{'question': str, 'sql': str, 'result_summary': str}, ...]
+
+    返回 dict 新增字段：
+      repair_attempts  : int   — SQL 修复尝试次数（0 = 首次生成即通过）
+      insight_confidence: float — 洞察自评置信分（0-1）
     """
-    result = {'question': question, 'sql': '', 'data': pd.DataFrame(),
-              'insight': '', 'row_count': 0, 'error': None, 'result_summary': ''}
+    result = {
+        'question': question,
+        'sql': '',
+        'data': pd.DataFrame(),
+        'insight': '',
+        'row_count': 0,
+        'error': None,
+        'result_summary': '',
+        'repair_attempts': 0,
+        'insight_confidence': 0.0,
+    }
     try:
         client = get_ch_client()
         schema = get_schema(client)
 
-        log.info('[NL2SQL] %s', question)
+        log.info('[NL2SQL] session=%s question=%s', session_id, question)
+
+        # ── 步骤1：生成 SQL ───────────────────────────────────────
         sql = generate_sql(question, schema, history=history)
         result['sql'] = sql
         log.info('[生成SQL] %s', sql)
 
         validate_sql(sql)
+
+        # ── 步骤2：EXPLAIN 验证 + Self-RAG 修复（最多2次）────────
+        MAX_REPAIRS = 2
+        is_valid, err_msg = _explain_sql(client, sql)
+
+        repair_attempts = 0
+        while not is_valid and repair_attempts < MAX_REPAIRS:
+            repair_attempts += 1
+            log.warning('[EXPLAIN失败] 第%d次修复，错误：%s', repair_attempts, err_msg)
+            sql = _repair_sql(question, sql, err_msg, schema)
+            result['sql'] = sql
+            log.info('[修复SQL] 第%d次：%s', repair_attempts, sql)
+
+            # 修复后再次检查安全规则
+            try:
+                validate_sql(sql)
+            except ValueError as ve:
+                result['error'] = str(ve)
+                result['repair_attempts'] = repair_attempts
+                log.error('[安全校验] 修复后 SQL 仍含危险操作：%s', ve)
+                return result
+
+            is_valid, err_msg = _explain_sql(client, sql)
+
+        result['repair_attempts'] = repair_attempts
+
+        if not is_valid:
+            # 2 次修复均失败：返回错误 + 最后一次 SQL 供用户参考
+            result['error'] = (
+                f'SQL 验证失败（已尝试修复 {MAX_REPAIRS} 次）。'
+                f'最后错误：{err_msg}。'
+                f'参考 SQL（未执行）：{sql}'
+            )
+            log.error('[Self-RAG] %d 次修复均失败，放弃执行', MAX_REPAIRS)
+            return result
+
+        # ── 步骤3：执行 SQL ──────────────────────────────────────
         df = client.query_df(sql)
         result['data'] = df
         result['row_count'] = len(df)
         result['result_summary'] = _make_result_summary(df)
         log.info('[查询完成] %d 行', len(df))
 
+        # ── 步骤4：生成洞察 + Self-RAG 置信评分 ─────────────────
         if with_insight and len(df) > 0:
-            result['insight'] = generate_insight(question, sql, df)
+            data_summary = df.head(10).to_markdown(index=False)
+
+            insight = generate_insight(question, sql, df, conservative=False)
+            confidence = _score_insight(insight, data_summary)
+            result['insight_confidence'] = confidence
+
+            if confidence < 0.7:
+                log.info('[Self-RAG] 置信分 %.2f < 0.7，用保守 prompt 重新生成洞察', confidence)
+                insight = generate_insight(question, sql, df, conservative=True)
+                # 重新评分（仅做记录，不再二次迭代）
+                confidence2 = _score_insight(insight, data_summary)
+                result['insight_confidence'] = confidence2
+                log.info('[Self-RAG] 保守洞察置信分 %.2f', confidence2)
+
+            result['insight'] = insight
+            log.info(
+                '[NL2SQL完成] repair_attempts=%d insight_confidence=%.2f',
+                repair_attempts, result['insight_confidence'],
+            )
 
     except Exception as e:
         result['error'] = str(e)

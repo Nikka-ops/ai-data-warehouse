@@ -194,6 +194,69 @@ services:
     volumes:
       - .:/app
 
+  # ─── AI 告警引擎（触发→聚合→Agent决策→修复→通知）────────────
+  alert-engine:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_alert_engine
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+    command: python ai_layer/alert_engine/main.py --interval 60
+    <<: *restart-policy
+    volumes:
+      - .:/app
+
+  # ─── 业务指标告警（GMV下跌/取消率突增/品类异常）────────────
+  business-monitor:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_business_monitor
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+    command: python ai_layer/business_monitor.py
+    <<: *restart-policy
+    volumes:
+      - .:/app
+
+  # ─── 定时报告推送（日报/周报 → webhook）─────────────────────
+  report-scheduler:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_report_scheduler
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+    command: python ai_layer/report_scheduler.py
+    <<: *restart-policy
+    volumes:
+      - .:/app
+
+  # ─── 慢查询诊断（每30分钟扫描 system.query_log）────────────
+  slow-query-analyzer:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_slow_query
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+    command: python ai_layer/slow_query_analyzer.py
+    <<: *restart-policy
+    volumes:
+      - .:/app
+
   flink-jobmanager:
     image: flink:1.18-scala_2.12
     container_name: ai_dw_flink_jm
