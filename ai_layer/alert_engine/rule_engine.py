@@ -192,8 +192,10 @@ def run(ch) -> list:
         event = _run_rule(ch, rule)
         if event is not None:
             results.append(event)
-    # 执行来自 business_monitor 的环比告警规则
-    for fn in (rule_gmv_yoy_drop, rule_cancel_rate_yoy_delta, rule_category_yoy_drop):
+    # 执行来自 business_monitor 的环比告警规则及 alert_investigator 的独有规则
+    for fn in (rule_gmv_yoy_drop, rule_cancel_rate_yoy_delta, rule_category_yoy_drop,
+               rule_kafka_lag_by_group, rule_etl_quality_degradation,
+               rule_kappa_replay_failure):
         try:
             events = fn(ch)
             results.extend(events)
@@ -435,3 +437,47 @@ def rule_etl_quality_degradation(ch) -> list:
     )
     event.compute_fingerprint()
     return [event]
+
+
+# ── 来自 alert_investigator.py 的 Kappa 回放失败检测 ─────────────
+# alert_investigator 独有：按任务粒度检测 stream.kappa_replay_jobs 中失败任务，
+# 与 RULES 中无对应规则，补充 Kappa 回放监控盲区。
+
+def rule_kappa_replay_failure(ch) -> list:
+    """检测近30分钟内失败的 Kappa 回放任务，每个失败任务生成一条 P1 告警"""
+    try:
+        rows = ch.query("""
+            SELECT job_id, job_name, start_time, error_msg, records_processed
+            FROM stream.kappa_replay_jobs
+            WHERE status = 'failed'
+              AND start_time >= now() - INTERVAL 30 MINUTE
+        """).result_rows
+    except Exception as exc:
+        log.warning('[kappa_replay_failure] 查询失败（跳过）：%s', exc)
+        return []
+
+    events = []
+    for r in rows:
+        job_id   = str(r[0])
+        job_name = str(r[1])
+        err_msg  = str(r[3])[:200]
+        processed = int(r[4] or 0)
+        detail   = (f"Kappa 回放任务 {job_name}（{job_id[:8]}）执行失败，"
+                    f"已处理 {processed:,} 条。错误：{err_msg}")
+        log.warning('[business_rule] Kappa 回放失败告警：%s', detail)
+
+        event = AlertEvent(
+            source='rule_engine',
+            category='SYSTEM',
+            severity='P1',
+            title=f'Kappa 回放任务失败：{job_name}',
+            detail=detail,
+            metric_name='kappa_replay_failure',
+            current_value=1.0,
+            threshold_value=0.0,
+            affected_tables=['stream.kappa_replay_jobs'],
+            context={'job_id': job_id, 'job_name': job_name, 'records_processed': processed},
+        )
+        event.compute_fingerprint()
+        events.append(event)
+    return events
