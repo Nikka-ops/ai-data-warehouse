@@ -77,7 +77,7 @@ with st.sidebar:
 """, unsafe_allow_html=True)
 
     st.markdown("---")
-    page = st.radio("", ["💬 智能查询", "🤖 Agent 分析", "🗄️ 特征存储", "📡 业务监控"], label_visibility="collapsed")
+    page = st.radio("", ["💬 智能查询", "🤖 Agent 分析", "🗄️ 特征存储", "📡 业务监控", "🤖 告警引擎"], label_visibility="collapsed")
 
     if page == "💬 智能查询":
         st.markdown("---")
@@ -983,3 +983,196 @@ elif page == "📡 业务监控":
             st.success(f"Webhook 已配置：{webhook_url[:30]}...")
         else:
             st.warning("WEBHOOK_URL 未配置，报告只写入日志，不推送外部系统。在 .env 中设置 WEBHOOK_URL 即可启用推送。")
+
+# ══════════════════════════════════════════════════════════════
+# 告警引擎页
+# ══════════════════════════════════════════════════════════════
+elif page == "🤖 告警引擎":
+    st.title("🤖 AI 告警引擎")
+    st.caption("规则引擎 · 异常检测 · 趋势预测 · 血缘影响 → Agent 决策 → 安全闸门 → 自动修复")
+
+    _ae1, _ae2, _ae3, _ae4 = st.tabs(
+        ["📋 告警事件流", "🧠 Agent 决策日志", "📊 运行统计", "⚙️ 静默规则"]
+    )
+
+    @st.cache_resource
+    def _aech():
+        import clickhouse_connect
+        return clickhouse_connect.get_client(
+            host=cfg.ch_host, port=cfg.ch_port,
+            username=cfg.ch_user, password=cfg.ch_password,
+            connect_timeout=10, send_receive_timeout=60,
+        )
+
+    SEVERITY_COLOR = {"P1": "🔴", "P2": "🟠", "P3": "🟡", "P4": "🔵"}
+    SOURCE_LABEL = {
+        "rule_engine": "规则引擎",
+        "anomaly_detector": "异常检测",
+        "trend_predictor": "趋势预测",
+        "lineage_impact": "血缘影响",
+    }
+
+    # ── Tab1：告警事件流 ──────────────────────────────────────
+    with _ae1:
+        col_sev, col_src, col_h = st.columns(3)
+        sev_filter = col_sev.multiselect("严重度", ["P1","P2","P3","P4"], default=["P1","P2","P3","P4"])
+        src_filter = col_src.multiselect("来源", list(SOURCE_LABEL.keys()),
+                                          format_func=lambda x: SOURCE_LABEL.get(x, x),
+                                          default=list(SOURCE_LABEL.keys()))
+        hours = col_h.slider("时间范围（小时）", 1, 72, 24)
+
+        try:
+            rows = _aech().query(f"""
+                SELECT alert_id, fired_at, severity, source, category,
+                       title, metric_name, current_value, threshold_value,
+                       affected_tables, downstream_tables
+                FROM stream.alert_events
+                WHERE fired_at >= now() - INTERVAL {hours} HOUR
+                  AND severity IN ({','.join(f"'{s}'" for s in sev_filter)})
+                  AND source IN ({','.join(f"'{s}'" for s in src_filter)})
+                ORDER BY fired_at DESC
+                LIMIT 200
+            """).result_rows
+
+            if rows:
+                df_ae = pd.DataFrame(rows, columns=[
+                    "ID","时间","严重度","来源","类别","标题",
+                    "指标","当前值","阈值","直接影响表","下游表"
+                ])
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("总告警数", len(df_ae))
+                c2.metric("P1", int((df_ae["严重度"]=="P1").sum()))
+                c3.metric("P2", int((df_ae["严重度"]=="P2").sum()))
+                c4.metric("涉及表数", int(df_ae["直接影响表"].explode().nunique()))
+
+                for _, r in df_ae.head(30).iterrows():
+                    icon = SEVERITY_COLOR.get(r["严重度"], "⚪")
+                    src  = SOURCE_LABEL.get(r["来源"], r["来源"])
+                    with st.expander(f"{icon} [{r['严重度']}] {r['标题']}  —  {str(r['时间'])[:19]}  ({src})"):
+                        col_a, col_b = st.columns(2)
+                        col_a.write(f"**指标**：{r['指标']}  |  **当前**：{r['当前值']:.2f}  |  **阈值**：{r['阈值']:.2f}")
+                        col_b.write(f"**类别**：{r['类别']}  |  **来源**：{src}")
+                        if r["直接影响表"]:
+                            st.write(f"**直接影响**：{', '.join(r['直接影响表'])}")
+                        if r["下游表"]:
+                            st.write(f"**血缘下游**：{', '.join(r['下游表'])}")
+            else:
+                st.success(f"✅ 过去 {hours} 小时内无告警")
+        except Exception as ex:
+            st.error(f"查询失败：{ex}")
+
+        if st.button("🔄 刷新", key="ae_refresh"):
+            st.rerun()
+
+    # ── Tab2：Agent 决策日志 ──────────────────────────────────
+    with _ae2:
+        st.markdown("每次 Agent 处置的决策链路：技能调用 → 安全闸门 → 执行结果")
+        try:
+            rows = _aech().query("""
+                SELECT log_time, alert_title, alert_severity, skill_name,
+                       action_type, target, risk_level, dry_run,
+                       allowed, success, message
+                FROM stream.agent_decision_log
+                ORDER BY log_time DESC
+                LIMIT 100
+            """).result_rows
+            if rows:
+                df_dl = pd.DataFrame(rows, columns=[
+                    "时间","告警标题","严重度","技能","动作","目标",
+                    "风险级别","DryRun","已放行","成功","消息"
+                ])
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("总执行次数", len(df_dl))
+                c2.metric("成功（非DryRun）", int(((df_dl["成功"]==1)&(df_dl["DryRun"]==0)).sum()))
+                c3.metric("被安全闸门拦截", int((df_dl["已放行"]==0).sum()))
+                c4.metric("DryRun 次数", int((df_dl["DryRun"]==1).sum()))
+
+                for _, r in df_dl.head(30).iterrows():
+                    status = "✅" if r["成功"] else ("🔒" if not r["已放行"] else "❌")
+                    dr = "🔍DryRun" if r["DryRun"] else "⚡执行"
+                    with st.expander(f"{status} {dr} — {r['技能']}({r['动作']}) → {r['目标']}  {str(r['时间'])[:19]}"):
+                        st.write(f"**告警**：[{r['严重度']}] {r['告警标题']}")
+                        st.write(f"**风险级别**：{r['风险级别']}  |  **放行**：{'是' if r['已放行'] else '否（被闸门拦截）'}")
+                        if r["消息"]:
+                            st.caption(r["消息"])
+            else:
+                st.info("暂无决策日志（等待 alert-engine 服务运行）")
+        except Exception as ex:
+            st.error(f"查询失败：{ex}")
+
+    # ── Tab3：运行统计 ────────────────────────────────────────
+    with _ae3:
+        try:
+            # 告警趋势图
+            rows = _aech().query("""
+                SELECT hour_start, severity, alert_count
+                FROM stream.alert_hourly_trend
+                ORDER BY hour_start
+            """).result_rows
+            if rows:
+                df_trend = pd.DataFrame(rows, columns=["时间","严重度","告警数"])
+                fig = px.bar(df_trend, x="时间", y="告警数", color="严重度",
+                             color_discrete_map={"P1":"#e74c3c","P2":"#e67e22","P3":"#f1c40f","P4":"#3498db"},
+                             title="最近24小时告警趋势（按小时）", barmode="stack")
+                st.plotly_chart(fig, use_container_width=True)
+
+            # 噪音 Top
+            rows2 = _aech().query("""
+                SELECT title, source, fire_count, worst_severity, last_fired
+                FROM stream.alert_top_noise LIMIT 10
+            """).result_rows
+            if rows2:
+                st.markdown("**高频告警 Top10（过去24小时）**")
+                df_noise = pd.DataFrame(rows2, columns=["标题","来源","触发次数","最高严重度","最后触发"])
+                st.dataframe(df_noise, use_container_width=True, hide_index=True)
+
+            # Agent 成功率
+            rows3 = _aech().query("""
+                SELECT skill_name, action_type, total, executed_success, blocked_count
+                FROM stream.agent_success_rate LIMIT 20
+            """).result_rows
+            if rows3:
+                st.markdown("**Agent 操作成功率（近7天）**")
+                df_sr = pd.DataFrame(rows3, columns=["技能","动作","总次数","成功执行","被拦截"])
+                st.dataframe(df_sr, use_container_width=True, hide_index=True)
+        except Exception as ex:
+            st.error(f"查询失败：{ex}")
+
+    # ── Tab4：静默规则 ────────────────────────────────────────
+    with _ae4:
+        st.markdown("配置告警静默规则，在维护窗口期间抑制特定告警。")
+        try:
+            rows = _aech().query("""
+                SELECT rule_id, created_at, source, metric_name, expires_at, reason
+                FROM stream.alert_silence_rules
+                WHERE expires_at > now()
+                ORDER BY created_at DESC
+            """).result_rows
+            if rows:
+                df_sr = pd.DataFrame(rows, columns=["ID","创建时间","来源过滤","指标过滤","到期时间","原因"])
+                st.dataframe(df_sr, use_container_width=True, hide_index=True)
+            else:
+                st.info("当前无有效静默规则")
+        except Exception as ex:
+            st.error(f"查询失败：{ex}")
+
+        st.markdown("---")
+        st.markdown("**添加静默规则**")
+        with st.form("silence_form"):
+            col1, col2 = st.columns(2)
+            s_source = col1.text_input("来源过滤（留空=全部）", placeholder="rule_engine")
+            s_metric = col2.text_input("指标过滤（留空=全部）", placeholder="kafka_lag_max")
+            s_hours  = st.slider("静默时长（小时）", 1, 24, 2)
+            s_reason = st.text_input("原因", placeholder="计划维护窗口")
+            if st.form_submit_button("添加静默规则", type="primary"):
+                try:
+                    _aech().command(f"""
+                        INSERT INTO stream.alert_silence_rules
+                            (source, metric_name, expires_at, reason)
+                        VALUES ('{s_source}', '{s_metric}',
+                                now() + INTERVAL {s_hours} HOUR, '{s_reason}')
+                    """)
+                    st.success(f"已添加静默规则，{s_hours} 小时后自动失效")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"写入失败：{ex}")
