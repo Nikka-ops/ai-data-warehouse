@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from src.api.rest.schemas import QueryRequest, QueryResponse
 
 router = APIRouter(prefix="/query", tags=["查询"])
@@ -6,7 +6,8 @@ router = APIRouter(prefix="/query", tags=["查询"])
 @router.post("/nl2sql", response_model=QueryResponse)
 async def natural_language_query(req: QueryRequest):
     """自然语言转 SQL 查询"""
-    import sys, os
+    import sys
+    import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
     from ai_layer.nl2sql import nl2sql_query
     result = nl2sql_query(req.question)

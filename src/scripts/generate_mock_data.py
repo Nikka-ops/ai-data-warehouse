@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """生成测试数据（巴西电商模拟）"""
-import sys, os
+import sys
+import os
 sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 def main():
