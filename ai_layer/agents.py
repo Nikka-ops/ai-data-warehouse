@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Kappa 架构 AI 分析 Agent（Tool Calling 模式）"""
-import os, sys
+"""Kappa 架构 AI 分析 Multi-Agent（LangGraph Supervisor 模式）"""
+import os, sys, operator, json
+from typing import TypedDict, Annotated, Literal
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import create_react_agent
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
@@ -18,6 +20,53 @@ from ai_layer.tools import (
 
 log = get_logger('agents')
 
+# ══════════════════════════════════════════════════════════════
+# 状态定义
+# ══════════════════════════════════════════════════════════════
+
+class AgentState(TypedDict):
+    messages: Annotated[list, operator.add]
+    next_agent: str
+    goal: str
+    agent_outputs: Annotated[list, operator.add]
+    iterations: int
+    final_answer: str
+
+
+# ══════════════════════════════════════════════════════════════
+# 专家 Agent 工具分组
+# ══════════════════════════════════════════════════════════════
+
+DATA_TOOLS    = [query_data, get_etl_status]
+ANOMALY_TOOLS = [detect_realtime_anomaly, query_data, get_remediation_status,
+                 get_alert_investigations, get_forecast]
+INSIGHT_TOOLS = [generate_insight, get_proactive_insights, query_knowledge, query_data]
+KAPPA_TOOLS   = [get_kappa_status, trigger_kappa_replay, query_data, generate_insight]
+
+AGENT_REGISTRY = {
+    'DataAgent':    ('SQL 数据查询专家，负责从 ClickHouse 查询原始数据和 ETL 状态。',    DATA_TOOLS),
+    'AnomalyAgent': ('实时异常检测专家，负责检测流数据异常、查看修复状态和预测趋势。',    ANOMALY_TOOLS),
+    'InsightAgent': ('业务洞察专家，负责生成 AI 洞察、检索知识库和主动分析。',           INSIGHT_TOOLS),
+    'KappaAgent':   ('Kappa 架构专家，负责监控流处理健康状态和历史数据回放。',           KAPPA_TOOLS),
+}
+
+SUPERVISOR_AGENTS = list(AGENT_REGISTRY.keys()) + ['FINISH']
+
+SUPERVISOR_SYSTEM = """你是多 Agent 协调者，根据用户目标决定调用哪个专家 Agent。
+
+专家 Agent 职责：
+- DataAgent：SQL 查询 ClickHouse 数据，适合「查询数据、检查表」类任务
+- AnomalyAgent：检测异常、查看告警和修复状态，适合「异常检测、监控分析」类任务
+- InsightAgent：生成 AI 洞察、检索知识库，适合「分析原因、生成报告」类任务
+- KappaAgent：Kappa 架构状态分析和历史回放，适合「流处理健康、Lag 分析」类任务
+- FINISH：所有需要的信息已收集完毕，可以生成最终结论时选择
+
+规则：
+1. 每次只选一个 Agent 或 FINISH
+2. 相同 Agent 连续调用不超过 2 次
+3. 总轮次超过 8 次时强制选 FINISH
+4. 以 JSON 格式回复：{"next": "AgentName", "reason": "理由"}"""
+
 
 def _get_llm():
     return ChatOpenAI(
@@ -27,127 +76,179 @@ def _get_llm():
     )
 
 
-def _make_executor(tools: list, system_msg: str, max_iter: int = 10) -> AgentExecutor:
-    prompt = ChatPromptTemplate.from_messages([
-        ('system', system_msg),
-        ('human', '{input}'),
-        ('placeholder', '{agent_scratchpad}'),
-    ])
-    agent = create_tool_calling_agent(_get_llm(), tools, prompt)
-    return AgentExecutor(
-        agent=agent, tools=tools, verbose=True,
-        max_iterations=max_iter, return_intermediate_steps=True,
-        handle_parsing_errors=True,
+# ══════════════════════════════════════════════════════════════
+# Supervisor 节点
+# ══════════════════════════════════════════════════════════════
+
+def supervisor_node(state: AgentState) -> AgentState:
+    llm = _get_llm()
+    context_parts = [f'用户目标：{state["goal"]}']
+    if state['agent_outputs']:
+        context_parts.append('已收集信息：')
+        for item in state['agent_outputs'][-4:]:
+            context_parts.append(f'- [{item["agent"]}] {str(item["output"])[:300]}')
+
+    context_parts.append(f'当前迭代次数：{state["iterations"]}')
+
+    messages = [
+        SystemMessage(content=SUPERVISOR_SYSTEM),
+        HumanMessage(content='\n'.join(context_parts)),
+    ]
+
+    if state['iterations'] >= 8:
+        return {'next_agent': 'FINISH', 'iterations': state['iterations'] + 1, 'messages': []}
+
+    resp = llm.invoke(messages)
+    try:
+        raw = resp.content.strip()
+        if '```' in raw:
+            raw = raw.split('```')[1].lstrip('json').strip()
+        decision = json.loads(raw)
+        next_agent = decision.get('next', 'FINISH')
+    except Exception:
+        next_agent = 'FINISH'
+
+    if next_agent not in SUPERVISOR_AGENTS:
+        next_agent = 'FINISH'
+
+    log.info('Supervisor → %s (iter=%d)', next_agent, state['iterations'])
+    return {'next_agent': next_agent, 'iterations': state['iterations'] + 1, 'messages': []}
+
+
+def route_supervisor(state: AgentState) -> str:
+    return state['next_agent']
+
+
+# ══════════════════════════════════════════════════════════════
+# 专家 Agent 节点工厂
+# ══════════════════════════════════════════════════════════════
+
+def _make_agent_node(agent_name: str, system_desc: str, tools: list):
+    react_agent = create_react_agent(_get_llm(), tools)
+
+    def node(state: AgentState) -> AgentState:
+        log.info('%s 执行中...', agent_name)
+        goal = state['goal']
+        context = ''
+        if state['agent_outputs']:
+            prev = [f'[{o["agent"]}]: {str(o["output"])[:200]}' for o in state['agent_outputs'][-2:]]
+            context = '\n已有信息：\n' + '\n'.join(prev)
+
+        prompt = f'{system_desc}\n\n任务：{goal}{context}'
+        result = react_agent.invoke({'messages': [HumanMessage(content=prompt)]})
+        output_msg = result['messages'][-1]
+        output_text = output_msg.content if hasattr(output_msg, 'content') else str(output_msg)
+
+        return {
+            'agent_outputs': [{'agent': agent_name, 'output': output_text}],
+            'messages': [AIMessage(content=f'[{agent_name}] {output_text[:500]}')],
+        }
+
+    node.__name__ = agent_name.lower() + '_node'
+    return node
+
+
+# ══════════════════════════════════════════════════════════════
+# 合成节点：生成最终报告
+# ══════════════════════════════════════════════════════════════
+
+def synthesize_node(state: AgentState) -> AgentState:
+    llm = _get_llm()
+    collected = '\n\n'.join(
+        f'【{o["agent"]}】\n{o["output"]}' for o in state['agent_outputs']
     )
+    prompt = f"""根据以下各专家 Agent 的分析结果，为用户目标生成综合结论报告。
+
+用户目标：{state['goal']}
+
+各 Agent 分析结果：
+{collected}
+
+要求：
+1. 用中文回答，条理清晰
+2. 关键数据要有数字支撑
+3. 结论包括：当前状态、发现的问题、建议行动
+4. 控制在 500 字以内"""
+
+    resp = llm.invoke([HumanMessage(content=prompt)])
+    final = resp.content.strip()
+    log.info('综合分析完成，字数=%d', len(final))
+    return {'final_answer': final, 'messages': [AIMessage(content=final)]}
 
 
 # ══════════════════════════════════════════════════════════════
-# Agent 1：实时异常检测
+# 构建 Graph
 # ══════════════════════════════════════════════════════════════
 
-ANOMALY_SYSTEM = """你是实时数据监控专家，负责检测流式数据中的异常并分析原因。
+def _build_graph() -> StateGraph:
+    g = StateGraph(AgentState)
 
-执行步骤：
-1. 用 detect_realtime_anomaly 检测最近60分钟 order_cnt 异常
-2. 用 detect_realtime_anomaly 检测最近60分钟 total_gmv 异常
-3. 用 query_data 查当前最新5个分钟窗口：
-   SELECT window_start, order_cnt, total_gmv, avg_price, top_category
-   FROM dws.realtime_minute_stats ORDER BY window_start DESC LIMIT 5
-4. 用 query_data 查最新告警（含系统告警）：
-   SELECT alert_time, severity, alert_type, category, title
-   FROM stream.alert_unified ORDER BY alert_time DESC LIMIT 10
-5. 用 get_remediation_status 查看系统自动处置情况（已执行了哪些修复动作）
-6. 用 get_forecast 查 order_cnt 预测趋势
-7. 用 generate_insight 综合以上结果生成异常分析
+    g.add_node('supervisor', supervisor_node)
+    g.add_node('synthesize', synthesize_node)
 
-输出：当前流量状态是否正常，已发现的异常，系统自动处置了哪些问题（结果如何），预测走势。"""
+    for name, (desc, tools) in AGENT_REGISTRY.items():
+        g.add_node(name, _make_agent_node(name, desc, tools))
+        g.add_edge(name, 'supervisor')
 
-
-def run_anomaly_agent():
-    tools = [query_data, detect_realtime_anomaly, get_remediation_status,
-             get_alert_investigations, get_forecast, generate_insight]
-    log.info('启动实时异常检测 Agent')
-    return _make_executor(tools, ANOMALY_SYSTEM, max_iter=10).invoke(
-        {'input': '请对当前实时流数据进行全面异常检测，输出检测结论'}
+    g.add_conditional_edges(
+        'supervisor',
+        route_supervisor,
+        {
+            'DataAgent':    'DataAgent',
+            'AnomalyAgent': 'AnomalyAgent',
+            'InsightAgent': 'InsightAgent',
+            'KappaAgent':   'KappaAgent',
+            'FINISH':       'synthesize',
+        },
     )
+    g.add_edge('synthesize', END)
+    g.set_entry_point('supervisor')
+    return g.compile()
+
+
+_GRAPH = None
+
+def _get_graph():
+    global _GRAPH
+    if _GRAPH is None:
+        _GRAPH = _build_graph()
+    return _GRAPH
+
+
+def _run(goal: str, initial_agent: str | None = None) -> dict:
+    init_state: AgentState = {
+        'messages':     [HumanMessage(content=goal)],
+        'next_agent':   initial_agent or '',
+        'goal':         goal,
+        'agent_outputs':[],
+        'iterations':   0,
+        'final_answer': '',
+    }
+    result = _get_graph().invoke(init_state)
+    steps = [{'agent': o['agent'], 'output': o['output']} for o in result.get('agent_outputs', [])]
+    return {'output': result.get('final_answer', ''), 'intermediate_steps': steps}
 
 
 # ══════════════════════════════════════════════════════════════
-# Agent 2：Kappa 架构状态分析
+# 公共接口（向后兼容）
 # ══════════════════════════════════════════════════════════════
 
-KAPPA_SYSTEM = """你是 Kappa 架构数据工程师，负责监控流处理管道健康状态和历史回放进度。
-
-Kappa 架构原则：
-- 单一处理路径：Kafka（可回放日志）→ Flink（统一流引擎）→ ClickHouse（服务层）
-- 历史重算：通过 Flink 从 Kafka offset=earliest 重放，无需独立批处理管道
-- 幂等写入：dws.kappa_hourly_agg 使用 ReplacingMergeTree，重放可安全多次执行
-
-执行步骤：
-1. 用 get_kappa_status 查看整体状态（Lag、历史覆盖、回放任务）
-2. 用 query_data 查 Kappa 服务层当前覆盖：
-   SELECT source, count() AS hours, sum(order_cnt) AS orders, round(sum(total_gmv),0) AS gmv
-   FROM dws.kappa_serving_unified GROUP BY source
-3. 用 query_data 查最近的消费 lag 趋势：
-   SELECT toStartOfHour(check_time) AS hour, avg(lag) AS avg_lag, max(lag) AS max_lag
-   FROM stream.kappa_consumer_lag WHERE check_time >= now() - INTERVAL 6 HOUR
-   GROUP BY hour ORDER BY hour
-4. 用 query_data 查今日实时处理量：
-   SELECT sum(order_cnt) AS orders, round(sum(total_gmv),0) AS gmv
-   FROM dws.realtime_minute_stats WHERE window_start >= today()
-5. 若历史覆盖不足（最近30天内有空洞），判断是否需要触发回放
-6. 用 generate_insight 生成 Kappa 架构健康分析报告
-
-输出：流处理是否健康，历史数据覆盖情况，是否建议触发回放，当前处理 lag。"""
+def run_anomaly_agent() -> dict:
+    log.info('启动实时异常检测 Agent（LangGraph Supervisor）')
+    return _run('请对当前实时流数据进行全面异常检测，输出检测结论、系统自动处置情况和预测趋势')
 
 
-def run_kappa_agent():
-    tools = [query_data, get_kappa_status, trigger_kappa_replay, generate_insight]
-    log.info('启动 Kappa 架构状态分析 Agent')
-    return _make_executor(tools, KAPPA_SYSTEM, max_iter=8).invoke(
-        {'input': '请分析 Kappa 架构流处理管道的健康状态和历史数据覆盖情况'}
-    )
+def run_kappa_agent() -> dict:
+    log.info('启动 Kappa 架构状态分析 Agent（LangGraph Supervisor）')
+    return _run('请分析 Kappa 架构流处理管道的健康状态、历史数据覆盖情况和 Kafka 消费 Lag')
 
 
-# ══════════════════════════════════════════════════════════════
-# Agent 3：自由分析（全工具权限）
-# ══════════════════════════════════════════════════════════════
-
-FREE_SYSTEM = """你是 Kappa 架构实时数仓分析师，可自由调用工具分析数据。
-
-架构：Kafka（日志）→ Flink（统一流处理：实时 + 历史回放）→ ClickHouse（服务层）
-
-可用实时表：
-- ods.orders_stream / ods.payments_stream  实时流原始数据（Kafka 落地）
-- dwd.realtime_order_detail               Flink JOIN 宽表
-- dws.realtime_minute_stats               分钟级聚合（Flink 实时窗口）
-- dws.realtime_forecast                   AI 预测数据
-- stream.ai_quality_alerts                AI 质检告警（Flink 内嵌 AI 质量门控）
-- ads.realtime_hourly / realtime_category_today / realtime_state_today
-
-Kappa 历史聚合表（Flink 回放 Kafka 后写入）：
-- dws.kappa_hourly_agg                    小时级聚合（回放结果，幂等）
-- dws.kappa_serving_unified               统一服务视图（历史回放 + 实时互补）
-- dws.kappa_daily_trend                   日级趋势视图
-- dws.kappa_category_stats                品类维度视图
-- ads.kappa_current_totals                当前 GMV 汇总
-
-AI 与监控表：
-- stream.kappa_replay_jobs                回放任务记录
-- stream.kappa_consumer_lag               Kafka 消费 lag 监控
-- stream.alert_investigations             AI 告警排查记录
-- stream.proactive_insights               AI 主动洞察
-
-工作原则：先查数据 → 分析发现 → 生成洞察，用中文回答，结论有数字支撑。"""
-
-
-def run_free_agent(user_goal: str):
+def run_free_agent(user_goal: str) -> dict:
     log.info('启动自由分析 Agent：%s', user_goal[:60])
-    return _make_executor(ALL_TOOLS, FREE_SYSTEM, max_iter=12).invoke({'input': user_goal})
+    return _run(user_goal)
 
 
 if __name__ == '__main__':
-    import sys
     mode = sys.argv[1] if len(sys.argv) > 1 else '1'
     if mode == '1':
         r = run_anomaly_agent()
