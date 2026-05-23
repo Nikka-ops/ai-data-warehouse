@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Alert Orchestrator：使用 LangChain ReAct 模式处理告警事件。
-核心流程：诊断 → 查历史 → 评估影响 → 修复（dry_run → 执行）→ 记录知识
+Alert Orchestrator：使用 LangGraph StateGraph 处理告警事件。
+核心流程：并行诊断（diagnose + lineage + knowledge）→ 规划 → 安全检查
+         → 执行修复 → 验证（带重试）→ 记录知识 → 通知
 """
 import os
 import sys
 import json
 from datetime import datetime
+from typing import TypedDict, Annotated, Sequence
+import operator
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
@@ -25,191 +28,572 @@ from ai_layer.alert_engine.notifier import notify
 
 log = get_logger('alert_engine.orchestrator')
 
-# ── LangChain imports ─────────────────────────────────────────
+# ── LangGraph imports ──────────────────────────────────────────
+from langgraph.graph import StateGraph, END
+
+# ── LLM import ────────────────────────────────────────────────
 try:
-    from langchain.agents import AgentExecutor, create_react_agent
-    from langchain.tools import tool
     from langchain_openai import ChatOpenAI
-    from langchain.prompts import PromptTemplate
-    _LANGCHAIN_OK = True
-except ImportError as _lc_err:
-    log.warning("LangChain 导入失败，将使用降级模式: %s", _lc_err)
-    _LANGCHAIN_OK = False
+    _LLM_OK = True
+except ImportError as _llm_err:
+    log.warning("langchain_openai 导入失败，plan_action 将使用规则降级: %s", _llm_err)
+    _LLM_OK = False
 
-# ── ReAct System Prompt ───────────────────────────────────────
-SYSTEM_PROMPT = """你是一个数据仓库运维 Agent。你会收到一个告警事件，需要：
-1. 调用 diagnose_task 诊断受影响的表/作业
-2. 调用 query_knowledge 检索历史案例
-3. 调用 trace_lineage_impact 评估影响范围
-4. 根据诊断结果，选择合适的 auto_repair 动作（先 dry_run=True 验证，再 dry_run=False 执行）
-5. 调用 write_knowledge 记录处置结果
 
-输出最终决策报告，包含：根因推断、影响范围、执行动作、结果。"""
+# ── 图状态定义 ─────────────────────────────────────────────────
 
-REACT_PROMPT_TEMPLATE = """你是一个数据仓库运维 Agent，负责自动诊断和修复告警问题。
+class AlertState(TypedDict):
+    alert: dict                  # AlertEvent 序列化为 dict
+    diagnose_result: dict        # diagnose_task 输出
+    lineage_result: dict         # trace_lineage_impact 输出
+    knowledge_result: dict       # query_knowledge 输出
+    plan: str                    # LLM 生成的处置计划（JSON 字符串）
+    safety_check: dict           # 安全闸门结果
+    repair_result: dict          # auto_repair 输出
+    verify_result: dict          # 验证修复是否成功
+    notification_sent: bool
+    final_report: str            # 最终处置报告
+    retry_count: int             # 重试次数
+    escalated: bool              # 是否升级（超过最大重试）
+    messages: list               # 中间日志
 
-可用工具:
-{tools}
 
-工具名称列表: {tool_names}
+# ── 条件边函数 ─────────────────────────────────────────────────
 
-处理告警的步骤：
-1. 先用 diagnose_task 诊断受影响的表或作业健康状态
-2. 用 query_knowledge 检索历史相似案例
-3. 用 trace_lineage_impact 评估影响范围
-4. 根据诊断建议，先 dry_run=True 调用 auto_repair 验证，通过后 dry_run=False 执行
-5. 最后调用 write_knowledge 记录处置结果
+def check_safety(state: AlertState) -> str:
+    """安全闸门通过 → execute_repair，否则 → escalate"""
+    if state.get("safety_check", {}).get("allowed"):
+        return "execute_repair"
+    return "escalate"
 
-格式要求（严格遵守）:
-Thought: 我需要先...
-Action: 工具名称
-Action Input: 参数（JSON 格式）
-Observation: 工具返回结果
-... (重复 Thought/Action/Observation)
-Thought: 我已完成所有步骤
-Final Answer: 决策报告，包含根因推断、影响范围、执行动作、最终结果
 
-当前告警信息：
-{input}
+def should_retry(state: AlertState) -> str:
+    """验证成功 → write_knowledge；重试次数未满 → plan_action；超限 → escalate"""
+    if state.get("verify_result", {}).get("success"):
+        return "write_knowledge"
+    if state.get("retry_count", 0) < 2:
+        return "plan_action"
+    return "escalate"
 
-{agent_scratchpad}"""
 
+# ── 节点函数 ───────────────────────────────────────────────────
+
+def parallel_diagnose(state: AlertState) -> dict:
+    """fan-out 入口节点，本身不做任何处理，只做路由分发"""
+    return {}
+
+
+def diagnose_task_node(state: AlertState) -> dict:
+    """调用 diagnose_task 诊断目标健康状态"""
+    alert = state["alert"]
+    ch = state["_ch"]  # 通过闭包注入，见 _build_graph
+    target = (
+        alert.get("affected_tables", [None])[0]
+        if alert.get("affected_tables")
+        else alert.get("metric_name", "unknown")
+    )
+    msgs = list(state.get("messages", []))
+    try:
+        result = diagnose_task(ch, target)
+        msgs.append(f"[diagnose] target={target} status={result.get('status')}")
+    except Exception as e:
+        result = {
+            "target": target, "status": "unknown",
+            "last_write": "", "row_count": 0,
+            "details": f"诊断异常: {e}", "recommended_action": "trigger_etl",
+        }
+        msgs.append(f"[diagnose] 异常: {e}")
+    return {"diagnose_result": result, "messages": msgs}
+
+
+def lineage_node(state: AlertState) -> dict:
+    """调用 trace_lineage_impact 评估血缘影响"""
+    alert = state["alert"]
+    target = (
+        alert.get("affected_tables", [None])[0]
+        if alert.get("affected_tables")
+        else alert.get("metric_name", "unknown")
+    )
+    msgs = list(state.get("messages", []))
+    try:
+        result = trace_lineage_impact(target)
+        msgs.append(f"[lineage] impact_score={result.get('impact_score', 0)}")
+    except Exception as e:
+        result = {
+            "table": target, "upstream": [], "downstream": [],
+            "impact_score": 0, "summary": f"血缘追踪异常: {e}",
+        }
+        msgs.append(f"[lineage] 异常: {e}")
+    return {"lineage_result": result, "messages": msgs}
+
+
+def knowledge_node(state: AlertState) -> dict:
+    """调用 query_knowledge 检索历史案例"""
+    alert = state["alert"]
+    ch = state["_ch"]
+    incident_desc = alert.get("title", "")
+    msgs = list(state.get("messages", []))
+    try:
+        result = query_knowledge(ch, incident_desc)
+        msgs.append(f"[knowledge] found={result.get('found')} cases={len(result.get('cases', []))}")
+    except Exception as e:
+        result = {"found": False, "cases": [], "suggestion": f"知识库查询异常: {e}"}
+        msgs.append(f"[knowledge] 异常: {e}")
+    return {"knowledge_result": result, "messages": msgs}
+
+
+def join_diagnose(state: AlertState) -> dict:
+    """fan-in 汇聚节点：等待三个并行子节点完成后继续"""
+    msgs = list(state.get("messages", []))
+    msgs.append("[join_diagnose] 并行诊断完成，准备规划")
+    return {"messages": msgs}
+
+
+def plan_action(state: AlertState) -> dict:
+    """LLM 根据三个诊断结果生成处置计划（JSON 字符串）"""
+    alert = state["alert"]
+    diagnose = state.get("diagnose_result", {})
+    lineage = state.get("lineage_result", {})
+    knowledge = state.get("knowledge_result", {})
+    msgs = list(state.get("messages", []))
+
+    # 上次修复失败信息（重试时携带）
+    last_failure = ""
+    verify = state.get("verify_result", {})
+    if verify and not verify.get("success") and verify.get("reason"):
+        last_failure = verify["reason"]
+
+    prompt_text = (
+        "你是数据仓库运维专家。基于以下诊断信息，制定处置计划。\n\n"
+        f"告警：{alert.get('severity')} - {alert.get('title')}\n"
+        f"任务诊断：{json.dumps(diagnose, ensure_ascii=False)}\n"
+        f"血缘影响：{json.dumps(lineage, ensure_ascii=False)}"
+        f"（影响分数：{lineage.get('impact_score', 0)}）\n"
+        f"历史案例：{json.dumps(knowledge, ensure_ascii=False)}\n"
+        f"上次修复失败原因（若有）：{last_failure}\n\n"
+        "输出 JSON（只输出 JSON，不要有其他文字）：\n"
+        "{\n"
+        '  "action_type": "restart_replay|trigger_etl|clear_stale_features|quarantine|noop",\n'
+        '  "target": "目标表或作业名",\n'
+        '  "reason": "选择此动作的原因",\n'
+        '  "risk_assessment": "风险评估"\n'
+        "}"
+    )
+
+    plan_str = ""
+    if _LLM_OK:
+        try:
+            llm = ChatOpenAI(
+                model=cfg.llm_model,
+                api_key=cfg.api_key,
+                base_url=cfg.api_base_url,
+                temperature=cfg.insight_temperature,
+            )
+            resp = llm.invoke(prompt_text)
+            plan_str = resp.content.strip()
+            # 去掉可能的 markdown 代码块包裹
+            if plan_str.startswith("```"):
+                lines = plan_str.splitlines()
+                plan_str = "\n".join(
+                    l for l in lines if not l.strip().startswith("```")
+                ).strip()
+            msgs.append(f"[plan_action] LLM 规划成功")
+        except Exception as e:
+            msgs.append(f"[plan_action] LLM 调用失败，降级到规则: {e}")
+            plan_str = ""
+
+    # 降级：从 diagnose_result 直接推断
+    if not plan_str:
+        action_type = diagnose.get("recommended_action", "noop") or "noop"
+        target = diagnose.get("target", alert.get("metric_name", "unknown"))
+        plan_str = json.dumps({
+            "action_type": action_type,
+            "target": target,
+            "reason": f"规则降级：诊断状态={diagnose.get('status')}，推荐动作={action_type}",
+            "risk_assessment": "低风险，自动降级规则产生",
+        }, ensure_ascii=False)
+        msgs.append(f"[plan_action] 规则降级 action_type={action_type} target={target}")
+
+    return {"plan": plan_str, "messages": msgs}
+
+
+def safety_check_node(state: AlertState) -> dict:
+    """调用 SafetyGate.check() 进行安全检查"""
+    ch = state["_ch"]
+    gate = state["_gate"]
+    msgs = list(state.get("messages", []))
+
+    try:
+        plan = json.loads(state.get("plan", "{}"))
+    except Exception:
+        plan = {}
+
+    action_type = plan.get("action_type", "noop")
+    target = plan.get("target", "unknown")
+
+    if action_type == "noop":
+        result = {"allowed": True, "reason": "noop 操作无需安全检查", "action_type": action_type, "target": target}
+        msgs.append("[safety_check] noop，跳过安全检查")
+        return {"safety_check": result, "messages": msgs}
+
+    try:
+        allowed, reason = gate.check(action_type, target)
+        result = {"allowed": allowed, "reason": reason, "action_type": action_type, "target": target}
+        msgs.append(f"[safety_check] allowed={allowed} reason={reason}")
+    except Exception as e:
+        result = {"allowed": False, "reason": f"安全检查异常: {e}", "action_type": action_type, "target": target}
+        msgs.append(f"[safety_check] 异常: {e}")
+
+    return {"safety_check": result, "messages": msgs}
+
+
+def execute_repair(state: AlertState) -> dict:
+    """执行修复操作（dry_run=False）"""
+    ch = state["_ch"]
+    gate = state["_gate"]
+    alert = state["alert"]
+    safety = state.get("safety_check", {})
+    msgs = list(state.get("messages", []))
+
+    action_type = safety.get("action_type", "noop")
+    target = safety.get("target", "unknown")
+
+    if action_type == "noop":
+        result = {
+            "action_type": "noop", "target": target,
+            "dry_run": False, "success": True,
+            "message": "noop：无需修复操作", "risk_level": "low",
+        }
+        msgs.append("[execute_repair] noop，跳过修复")
+        return {"repair_result": result, "messages": msgs}
+
+    try:
+        result = auto_repair(ch, action_type, target, dry_run=False)
+        msgs.append(
+            f"[execute_repair] action={action_type} target={target} "
+            f"success={result.get('success')} msg={result.get('message', '')[:80]}"
+        )
+        # 记录执行日志
+        try:
+            gate.record_execution(
+                action_type=action_type,
+                target=target,
+                alert_id=alert.get("alert_id", ""),
+                success=result.get("success", False),
+                dry_run=False,
+                alert_title=alert.get("title", ""),
+                alert_severity=alert.get("severity", ""),
+                risk_level=result.get("risk_level", ""),
+                allowed=True,
+                message=result.get("message", ""),
+            )
+        except Exception as log_err:
+            msgs.append(f"[execute_repair] 记录执行日志失败: {log_err}")
+    except Exception as e:
+        result = {
+            "action_type": action_type, "target": target,
+            "dry_run": False, "success": False,
+            "message": f"修复执行异常: {e}", "risk_level": "unknown",
+        }
+        msgs.append(f"[execute_repair] 异常: {e}")
+
+    return {"repair_result": result, "messages": msgs}
+
+
+def verify_repair(state: AlertState) -> dict:
+    """重新调用 diagnose_task 验证修复状态"""
+    ch = state["_ch"]
+    diagnose_before = state.get("diagnose_result", {})
+    repair = state.get("repair_result", {})
+    msgs = list(state.get("messages", []))
+
+    target = repair.get("target") or diagnose_before.get("target", "unknown")
+    status_before = diagnose_before.get("status", "unknown")
+
+    # noop 场景：直接标记成功
+    if repair.get("action_type") == "noop":
+        result = {"success": True, "status_before": status_before, "status_after": status_before, "reason": "noop 操作，无需验证"}
+        msgs.append("[verify_repair] noop，标记成功")
+        return {"verify_result": result, "messages": msgs}
+
+    # 修复本身失败，不必重新诊断
+    if not repair.get("success"):
+        result = {
+            "success": False,
+            "status_before": status_before,
+            "status_after": "unknown",
+            "reason": f"修复操作本身失败: {repair.get('message', '')}",
+        }
+        msgs.append(f"[verify_repair] 修复失败，跳过重诊断")
+        return {
+            "verify_result": result,
+            "retry_count": state.get("retry_count", 0) + 1,
+            "messages": msgs,
+        }
+
+    try:
+        diag_after = diagnose_task(ch, target)
+        status_after = diag_after.get("status", "unknown")
+        # 成功判定：修复前为 degraded/down，修复后变为 healthy
+        success = (
+            status_before in ("degraded", "down")
+            and status_after == "healthy"
+        ) or status_after == "healthy"
+        reason = (
+            f"修复前状态={status_before}，修复后状态={status_after}"
+            if not success
+            else ""
+        )
+        result = {
+            "success": success,
+            "status_before": status_before,
+            "status_after": status_after,
+            "reason": reason,
+        }
+        msgs.append(f"[verify_repair] before={status_before} after={status_after} success={success}")
+    except Exception as e:
+        result = {
+            "success": False,
+            "status_before": status_before,
+            "status_after": "unknown",
+            "reason": f"验证诊断异常: {e}",
+        }
+        msgs.append(f"[verify_repair] 异常: {e}")
+
+    new_retry = state.get("retry_count", 0) + (0 if result["success"] else 1)
+    return {"verify_result": result, "retry_count": new_retry, "messages": msgs}
+
+
+def write_knowledge_node(state: AlertState) -> dict:
+    """修复成功后将处置结果写入知识库"""
+    ch = state["_ch"]
+    alert = state["alert"]
+    diagnose = state.get("diagnose_result", {})
+    lineage = state.get("lineage_result", {})
+    repair = state.get("repair_result", {})
+    msgs = list(state.get("messages", []))
+
+    resolution = (
+        f"[LangGraph自动处理] "
+        f"诊断={diagnose.get('status')} "
+        f"动作={repair.get('action_type')} "
+        f"结果={'成功' if repair.get('success') else '失败'} "
+        f"血缘影响={lineage.get('summary', '')}"
+    )
+    try:
+        write_knowledge(ch, alert.get("alert_id", ""), resolution, repair.get("success", False))
+        msgs.append("[write_knowledge] 写入成功")
+    except Exception as e:
+        msgs.append(f"[write_knowledge] 写入失败: {e}")
+
+    return {"messages": msgs}
+
+
+def notify_success(state: AlertState) -> dict:
+    """修复成功后发送通知，生成最终报告"""
+    alert_dict = state["alert"]
+    diagnose = state.get("diagnose_result", {})
+    lineage = state.get("lineage_result", {})
+    knowledge = state.get("knowledge_result", {})
+    repair = state.get("repair_result", {})
+    verify = state.get("verify_result", {})
+    msgs = list(state.get("messages", []))
+
+    final_report = (
+        f"[修复成功]\n"
+        f"根因推断: {diagnose.get('details', '未知')}\n"
+        f"影响范围: {lineage.get('summary', '未知')}\n"
+        f"历史建议: {knowledge.get('suggestion', '无')}\n"
+        f"执行动作: {repair.get('action_type', '无')}\n"
+        f"执行结果: {repair.get('message', '未执行')}\n"
+        f"验证状态: {verify.get('status_before', '?')} → {verify.get('status_after', '?')}"
+    )
+
+    # 构造 decision 兼容 notifier 接口
+    decision = {
+        "alert_id": alert_dict.get("alert_id", ""),
+        "skill": "auto_repair",
+        "action": repair.get("action_type", ""),
+        "result": repair.get("message", "")[:200],
+        "success": True,
+        "report": final_report,
+    }
+
+    try:
+        # 需要一个带属性的对象，用简单适配器包装 dict
+        alert_obj = _DictAlert(alert_dict)
+        notify(alert_obj, decision)
+        msgs.append("[notify_success] 通知已发送")
+    except Exception as e:
+        msgs.append(f"[notify_success] 通知失败: {e}")
+
+    return {
+        "final_report": final_report,
+        "notification_sent": True,
+        "messages": msgs,
+    }
+
+
+def escalate(state: AlertState) -> dict:
+    """安全检查拒绝或超过最大重试，升级处理"""
+    alert_dict = state["alert"]
+    safety = state.get("safety_check", {})
+    verify = state.get("verify_result", {})
+    msgs = list(state.get("messages", []))
+
+    reason = (
+        safety.get("reason", "")
+        or verify.get("reason", "")
+        or "超过最大重试次数"
+    )
+
+    final_report = (
+        f"[人工升级]\n"
+        f"告警: {alert_dict.get('severity')} - {alert_dict.get('title')}\n"
+        f"升级原因: {reason}\n"
+        f"重试次数: {state.get('retry_count', 0)}\n"
+        f"诊断状态: {state.get('diagnose_result', {}).get('status', '未知')}"
+    )
+    msgs.append(f"[escalate] 升级处理，原因: {reason}")
+
+    return {"escalated": True, "final_report": final_report, "messages": msgs}
+
+
+def notify_escalate(state: AlertState) -> dict:
+    """升级通知"""
+    alert_dict = state["alert"]
+    msgs = list(state.get("messages", []))
+
+    decision = {
+        "alert_id": alert_dict.get("alert_id", ""),
+        "skill": "escalate",
+        "action": "human_intervention",
+        "result": state.get("final_report", "")[:200],
+        "success": False,
+        "report": state.get("final_report", ""),
+    }
+
+    try:
+        alert_obj = _DictAlert(alert_dict)
+        notify(alert_obj, decision)
+        msgs.append("[notify_escalate] 升级通知已发送")
+    except Exception as e:
+        msgs.append(f"[notify_escalate] 通知失败: {e}")
+
+    return {"notification_sent": True, "messages": msgs}
+
+
+# ── 辅助适配器 ─────────────────────────────────────────────────
+
+class _DictAlert:
+    """将 alert dict 包装为带属性的对象，兼容 notifier 接口"""
+    def __init__(self, d: dict):
+        self.__dict__.update(d)
+        # 确保列表字段存在
+        if not hasattr(self, "affected_tables"):
+            self.affected_tables = []
+        if not hasattr(self, "downstream_tables"):
+            self.downstream_tables = []
+        if not hasattr(self, "fired_at"):
+            self.fired_at = datetime.now()
+
+
+# ── 主编排器类 ─────────────────────────────────────────────────
 
 class AlertOrchestrator:
     def __init__(self, ch):
         self.ch = ch
         self.gate = SafetyGate(ch)
-        self._agent_executor = None
-        if _LANGCHAIN_OK:
-            self._agent_executor = self._build_agent()
+        self.graph = self._build_graph()
 
-    # ── Agent 构建 ────────────────────────────────────────────
-
-    def _build_agent(self):
-        """构建 LangChain ReAct Agent，将 Skills 包装为 LangChain Tools"""
+    def _build_graph(self):
+        """构建并编译 LangGraph StateGraph"""
         ch = self.ch
         gate = self.gate
 
-        @tool
-        def diagnose_task_tool(target: str) -> str:
-            """
-            诊断指定表或 Flink 作业的健康状态。
-            参数: target - 表名（如 dws.realtime_minute_stats）或作业名（如 flink-stream）
-            返回: JSON 字符串，含 status/last_write/row_count/details/recommended_action
-            """
-            result = diagnose_task(ch, target)
-            return json.dumps(result, ensure_ascii=False, default=str)
+        # 为节点注入 ch 和 gate（通过 state 中的私有键）
+        # 因 LangGraph 节点签名为 (state) -> dict，用闭包包装注入依赖
+        def _inject(fn):
+            def wrapper(state: AlertState) -> dict:
+                # 注入运行时依赖
+                state = dict(state)
+                state["_ch"] = ch
+                state["_gate"] = gate
+                return fn(state)
+            wrapper.__name__ = fn.__name__
+            return wrapper
 
-        @tool
-        def query_knowledge_tool(incident_desc: str) -> str:
-            """
-            在历史告警处置记录中检索相似案例。
-            参数: incident_desc - 告警描述或关键词
-            返回: JSON 字符串，含 found/cases/suggestion
-            """
-            result = query_knowledge(ch, incident_desc)
-            return json.dumps(result, ensure_ascii=False, default=str)
+        builder = StateGraph(AlertState)
 
-        @tool
-        def trace_lineage_impact_tool(table: str) -> str:
-            """
-            追踪指定表的血缘链路，评估影响范围。
-            参数: table - 表名（如 dws.realtime_minute_stats）
-            返回: JSON 字符串，含 upstream/downstream/impact_score/summary
-            """
-            result = trace_lineage_impact(table)
-            return json.dumps(result, ensure_ascii=False, default=str)
+        # 添加所有节点
+        builder.add_node("parallel_diagnose", _inject(parallel_diagnose))
+        builder.add_node("diagnose_task_node", _inject(diagnose_task_node))
+        builder.add_node("lineage_node", _inject(lineage_node))
+        builder.add_node("knowledge_node", _inject(knowledge_node))
+        builder.add_node("join_diagnose", _inject(join_diagnose))
+        builder.add_node("plan_action", _inject(plan_action))
+        builder.add_node("safety_check_node", _inject(safety_check_node))
+        builder.add_node("execute_repair", _inject(execute_repair))
+        builder.add_node("verify_repair", _inject(verify_repair))
+        builder.add_node("write_knowledge", _inject(write_knowledge_node))
+        builder.add_node("notify_success", _inject(notify_success))
+        builder.add_node("escalate", _inject(escalate))
+        builder.add_node("notify_escalate", _inject(notify_escalate))
 
-        @tool
-        def auto_repair_tool(action_type: str, target: str, dry_run: bool = True) -> str:
-            """
-            执行自动修复操作，内含安全闸门检查。
-            参数:
-              action_type - 操作类型: restart_replay/trigger_etl/clear_stale_features/quarantine
-              target - 目标表名或作业名
-              dry_run - True=模拟不执行, False=真实执行（默认 True）
-            返回: JSON 字符串，含 success/message/risk_level
-            """
-            # 安全闸门检查（只在真实执行时）
-            if not dry_run:
-                allowed, reason = gate.check(action_type, target)
-                if not allowed:
-                    result = {
-                        "action_type": action_type,
-                        "target": target,
-                        "dry_run": dry_run,
-                        "success": False,
-                        "message": f"安全闸门拒绝: {reason}",
-                        "risk_level": "blocked",
-                    }
-                    log.warning("[ORCHESTRATOR] 安全闸门拒绝执行: %s -> %s", action_type, target)
-                    return json.dumps(result, ensure_ascii=False)
+        # 入口
+        builder.set_entry_point("parallel_diagnose")
 
-            result = auto_repair(ch, action_type, target, dry_run=dry_run)
+        # fan-out：parallel_diagnose → 三个并行子节点
+        builder.add_edge("parallel_diagnose", "diagnose_task_node")
+        builder.add_edge("parallel_diagnose", "lineage_node")
+        builder.add_edge("parallel_diagnose", "knowledge_node")
 
-            # 记录执行日志
-            gate.record_execution(
-                action_type=action_type,
-                target=target,
-                alert_id="",
-                success=result.get("success", False),
-                dry_run=dry_run,
-                risk_level=result.get("risk_level", ""),
-                allowed=True,
-                message=result.get("message", ""),
-            )
-            return json.dumps(result, ensure_ascii=False, default=str)
+        # fan-in：三个子节点 → join_diagnose
+        builder.add_edge("diagnose_task_node", "join_diagnose")
+        builder.add_edge("lineage_node", "join_diagnose")
+        builder.add_edge("knowledge_node", "join_diagnose")
 
-        @tool
-        def write_knowledge_tool(alert_id: str, resolution: str, success: bool) -> str:
-            """
-            将告警处置结果写入知识库，供未来检索。
-            参数:
-              alert_id - 告警 ID
-              resolution - 处置说明（根因 + 执行动作 + 结果）
-              success - 是否成功解决
-            返回: "OK" 或错误信息
-            """
-            try:
-                write_knowledge(ch, alert_id, resolution, success)
-                return "OK"
-            except Exception as e:
-                return f"写入失败: {e}"
+        # 主流程
+        builder.add_edge("join_diagnose", "plan_action")
+        builder.add_edge("plan_action", "safety_check_node")
 
-        tools = [
-            diagnose_task_tool,
-            query_knowledge_tool,
-            trace_lineage_impact_tool,
-            auto_repair_tool,
-            write_knowledge_tool,
-        ]
-
-        llm = ChatOpenAI(
-            model=cfg.llm_model,
-            api_key=cfg.api_key,
-            base_url=cfg.api_base_url,
-            temperature=cfg.insight_temperature,
+        # 条件边：安全检查
+        builder.add_conditional_edges(
+            "safety_check_node",
+            check_safety,
+            {
+                "execute_repair": "execute_repair",
+                "escalate": "escalate",
+            },
         )
 
-        prompt = PromptTemplate.from_template(REACT_PROMPT_TEMPLATE)
+        builder.add_edge("execute_repair", "verify_repair")
 
-        agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
-        executor = AgentExecutor(
-            agent=agent,
-            tools=tools,
-            verbose=True,
-            max_iterations=12,
-            handle_parsing_errors=True,
-            return_intermediate_steps=True,
+        # 条件边：验证结果
+        builder.add_conditional_edges(
+            "verify_repair",
+            should_retry,
+            {
+                "write_knowledge": "write_knowledge",
+                "plan_action": "plan_action",
+                "escalate": "escalate",
+            },
         )
-        return executor
+
+        builder.add_edge("write_knowledge", "notify_success")
+        builder.add_edge("notify_success", END)
+
+        builder.add_edge("escalate", "notify_escalate")
+        builder.add_edge("notify_escalate", END)
+
+        return builder.compile()
 
     # ── 主处理入口 ────────────────────────────────────────────
 
     def handle(self, alert) -> dict:
         """
-        处理单个告警，返回决策结果 dict。
-        先写入 stream.alert_events，再运行 Agent，最后通知。
+        处理单个告警，返回 final_report 和关键字段。
+        保持与旧版 AlertOrchestrator.handle() 的兼容接口。
         """
         log.info(
             "[ORCHESTRATOR] 开始处理告警 alert_id=%s severity=%s title=%s",
@@ -222,173 +606,55 @@ class AlertOrchestrator:
         except Exception as e:
             log.warning("写入 alert_events 失败，继续处理: %s", e)
 
-        decision = {
-            "alert_id": alert.alert_id,
-            "skill": "",
-            "action": "",
-            "result": "",
-            "success": False,
-            "report": "",
+        # 构建初始状态（_ch 和 _gate 由节点闭包注入，不放入初始 state）
+        initial_state: AlertState = {
+            "alert": alert.__dict__.copy() if hasattr(alert, "__dict__") else dict(alert),
+            "diagnose_result": {},
+            "lineage_result": {},
+            "knowledge_result": {},
+            "plan": "",
+            "safety_check": {},
+            "repair_result": {},
+            "verify_result": {},
+            "notification_sent": False,
+            "final_report": "",
+            "retry_count": 0,
+            "escalated": False,
+            "messages": [],
         }
 
-        # 构建告警描述传给 Agent
-        alert_input = self._format_alert_input(alert)
-
-        if self._agent_executor is not None:
-            decision = self._run_agent(alert, alert_input, decision)
-        else:
-            decision = self._run_fallback(alert, decision)
-
-        # 发送通知
         try:
-            notify(alert, decision)
+            result = self.graph.invoke(initial_state)
         except Exception as e:
-            log.warning("通知发送失败，继续: %s", e)
+            log.error("[ORCHESTRATOR] LangGraph 执行异常: %s", e)
+            result = {
+                "final_report": f"图执行异常: {e}",
+                "escalated": True,
+                "repair_result": {},
+                "messages": [f"图执行异常: {e}"],
+            }
 
         log.info(
-            "[ORCHESTRATOR] 告警处理完成 alert_id=%s success=%s",
-            alert.alert_id, decision.get("success"),
-        )
-        return decision
-
-    def _format_alert_input(self, alert) -> str:
-        """将 AlertEvent 格式化为 Agent 输入字符串"""
-        affected = ', '.join(alert.affected_tables) if alert.affected_tables else '无'
-        downstream = ', '.join(alert.downstream_tables) if alert.downstream_tables else '无'
-        return (
-            f"告警ID: {alert.alert_id}\n"
-            f"来源: {alert.source}\n"
-            f"类别: {alert.category}\n"
-            f"严重程度: {alert.severity}\n"
-            f"标题: {alert.title}\n"
-            f"详情: {alert.detail}\n"
-            f"指标名称: {alert.metric_name}\n"
-            f"当前值: {alert.current_value}\n"
-            f"阈值: {alert.threshold_value}\n"
-            f"受影响表: {affected}\n"
-            f"下游影响表: {downstream}\n"
-            f"触发时间: {alert.fired_at}\n"
-            f"指纹: {alert.fingerprint}"
+            "[ORCHESTRATOR] 告警处理完成 alert_id=%s escalated=%s",
+            alert.alert_id, result.get("escalated"),
         )
 
-    def _run_agent(self, alert, alert_input: str, decision: dict) -> dict:
-        """运行 LangChain ReAct Agent"""
-        try:
-            result = self._agent_executor.invoke({"input": alert_input})
-            final_answer = result.get("output", "")
+        # 打印中间日志
+        for msg in result.get("messages", []):
+            log.debug("[STATE] %s", msg)
 
-            # 从中间步骤提取执行的技能和动作
-            skill_used = ""
-            action_used = ""
-            action_success = False
-
-            for step in result.get("intermediate_steps", []):
-                if not step:
-                    continue
-                agent_action = step[0] if isinstance(step, (list, tuple)) else step
-                tool_name = getattr(agent_action, "tool", "")
-                tool_input = getattr(agent_action, "tool_input", {})
-
-                if tool_name == "auto_repair_tool":
-                    skill_used = "auto_repair"
-                    if isinstance(tool_input, dict):
-                        action_used = tool_input.get("action_type", "")
-                    # 解析工具输出
-                    tool_output = step[1] if isinstance(step, (list, tuple)) and len(step) > 1 else ""
-                    try:
-                        out = json.loads(tool_output) if isinstance(tool_output, str) else {}
-                        if out.get("success"):
-                            action_success = True
-                    except Exception:
-                        pass
-
-            decision.update({
-                "skill": skill_used or "diagnose_task",
-                "action": action_used or "diagnose",
-                "result": final_answer[:500] if final_answer else "Agent 处理完成",
-                "success": action_success or ("成功" in final_answer or "完成" in final_answer),
-                "report": final_answer,
-            })
-
-        except Exception as e:
-            log.warning("[ORCHESTRATOR] Agent 执行异常，降级处理: %s", e)
-            decision = self._run_fallback(alert, decision)
-
-        return decision
-
-    def _run_fallback(self, alert, decision: dict) -> dict:
-        """降级处理：无 LangChain 时直接调用技能"""
-        log.info("[ORCHESTRATOR] 使用降级模式处理告警 alert_id=%s", alert.alert_id)
-
-        # Step 1: 诊断
-        target = alert.affected_tables[0] if alert.affected_tables else alert.metric_name
-        diag = diagnose_task(self.ch, target)
-        log.info("[FALLBACK] 诊断结果: status=%s recommended=%s", diag["status"], diag["recommended_action"])
-
-        # Step 2: 查历史
-        knowledge = query_knowledge(self.ch, alert.title)
-        log.info("[FALLBACK] 历史案例: found=%s suggestion=%s", knowledge["found"], knowledge["suggestion"])
-
-        # Step 3: 血缘影响
-        lineage = trace_lineage_impact(target)
-        log.info("[FALLBACK] 血缘影响: impact_score=%d", lineage["impact_score"])
-
-        # Step 4: 执行修复
-        action_type = diag.get("recommended_action", "")
-        repair_result = {}
-        action_success = False
-
-        if action_type:
-            # 安全闸门检查
-            allowed, reason = self.gate.check(action_type, target)
-            if allowed:
-                # dry_run 先验证
-                dry_result = auto_repair(self.ch, action_type, target, dry_run=True)
-                log.info("[FALLBACK] dry_run 结果: %s", dry_result["message"])
-
-                # 真实执行
-                repair_result = auto_repair(self.ch, action_type, target, dry_run=False)
-                action_success = repair_result.get("success", False)
-
-                # 记录日志
-                self.gate.record_execution(
-                    action_type=action_type,
-                    target=target,
-                    alert_id=alert.alert_id,
-                    success=action_success,
-                    dry_run=False,
-                    alert_title=alert.title,
-                    alert_severity=alert.severity,
-                    risk_level=repair_result.get("risk_level", ""),
-                    allowed=True,
-                    message=repair_result.get("message", ""),
-                )
-            else:
-                log.warning("[FALLBACK] 安全闸门拒绝: %s", reason)
-                repair_result = {"message": f"安全闸门拒绝: {reason}", "success": False}
-
-        # Step 5: 记录知识
-        resolution = (
-            f"[自动处理] 诊断={diag['status']} 动作={action_type} "
-            f"结果={'成功' if action_success else '失败'} "
-            f"血缘影响={lineage['summary']}"
-        )
-        write_knowledge(self.ch, alert.alert_id, resolution, action_success)
-
-        decision.update({
-            "skill": "auto_repair" if action_type else "diagnose_task",
-            "action": action_type or "diagnose",
-            "result": repair_result.get("message", diag["details"]),
-            "success": action_success,
-            "report": (
-                f"根因推断: {diag['details']}\n"
-                f"影响范围: {lineage['summary']}\n"
-                f"历史建议: {knowledge['suggestion']}\n"
-                f"执行动作: {action_type or '无'}\n"
-                f"执行结果: {repair_result.get('message', '未执行')}"
-            ),
-        })
-        return decision
+        return {
+            "final_report": result.get("final_report", ""),
+            "escalated": result.get("escalated", False),
+            "repair_result": result.get("repair_result", {}),
+            # 兼容旧版字段
+            "alert_id": alert.alert_id,
+            "skill": result.get("repair_result", {}).get("action_type", ""),
+            "action": result.get("repair_result", {}).get("action_type", ""),
+            "result": result.get("repair_result", {}).get("message", ""),
+            "success": result.get("repair_result", {}).get("success", False),
+            "report": result.get("final_report", ""),
+        }
 
     # ── 写入 alert_events ─────────────────────────────────────
 
