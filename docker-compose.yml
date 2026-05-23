@@ -194,6 +194,22 @@ services:
     volumes:
       - .:/app
 
+  # ─── AI 告警引擎（触发→聚合→Agent决策→修复→通知）────────────
+  alert-engine:
+    build: { context: ., dockerfile: Dockerfile.producer }
+    container_name: ai_dw_alert_engine
+    networks: [backend]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      <<: *common-env
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+    command: python ai_layer/alert_engine/main.py --interval 60
+    <<: *restart-policy
+    volumes:
+      - .:/app
+
   # ─── 业务指标告警（GMV下跌/取消率突增/品类异常）────────────
   business-monitor:
     build: { context: ., dockerfile: Dockerfile.producer }
