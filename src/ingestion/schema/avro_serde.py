@@ -12,7 +12,7 @@ import io
 try:
     import fastavro
     import fastavro.schema as fastavro_schema
-    _BACKEND = "fastavro"
+    _BACKEND: str | None = "fastavro"
 except ImportError:
     fastavro = None  # type: ignore[assignment]
     _BACKEND = None

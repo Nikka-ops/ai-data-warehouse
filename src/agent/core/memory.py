@@ -34,7 +34,7 @@ class LongTermMemory:
                 pass
         return self._collection
 
-    def store(self, content: str, metadata: dict = None):
+    def store(self, content: str, metadata: dict | None = None):
         coll = self._get_collection()
         if coll:
             import hashlib

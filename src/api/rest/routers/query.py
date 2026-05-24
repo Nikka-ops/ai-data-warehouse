@@ -9,8 +9,8 @@ async def natural_language_query(req: QueryRequest):
     import sys
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
-    from ai_layer.nl2sql import nl2sql_query
-    result = nl2sql_query(req.question)
+    from ai_layer.nl2sql import nl2sql
+    result = nl2sql(req.question)
     return QueryResponse(
         sql=result.get("sql", ""),
         data=result.get("data", []),

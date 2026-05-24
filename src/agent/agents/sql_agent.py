@@ -9,6 +9,6 @@ class SQLAgent(BaseAgent):
     name = "sql"
 
     def run(self, goal: str) -> dict:
-        from ai_layer.nl2sql import nl2sql_query
-        result = nl2sql_query(goal)
+        from ai_layer.nl2sql import nl2sql
+        result = nl2sql(goal)
         return self._wrap_result(str(result.get("insight", "")), [result])
