@@ -37,7 +37,7 @@ class TestSQLSecurity:
         assert is_safe_sql(sql), f"合法 SQL 不应被拦截: {sql}"
 
     def test_empty_sql_blocked(self):
-        assert not is_safe_sql("") or is_safe_sql("") == False or True  # 空SQL无害
+        assert is_safe_sql("")  # 空字符串无 first_word，不触发拦截规则
 
     def test_case_insensitive(self):
         assert not is_safe_sql("DROP table orders")
