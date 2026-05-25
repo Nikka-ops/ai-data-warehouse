@@ -1,6 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import Any
 from datetime import datetime
+from pydantic import BaseModel, Field
 
 class QueryRequest(BaseModel):
     question: str = Field(..., description="自然语言查询")

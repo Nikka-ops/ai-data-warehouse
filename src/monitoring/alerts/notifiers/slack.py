@@ -1,4 +1,5 @@
-import json, urllib.request
+import json
+import urllib.request
 
 def send_slack(webhook_url: str, title: str, content: str, severity: str = "P3") -> bool:
     """发送 Slack Block Kit 消息"""
