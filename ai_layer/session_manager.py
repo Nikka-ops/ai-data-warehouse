@@ -104,9 +104,9 @@ def load_session(session_id: str) -> dict:
         'rag_history':    [...],   # 注入 RAG messages
       }
     """
-    chat_messages  = []
-    nl2sql_history = []
-    rag_history    = []
+    chat_messages:  list[dict] = []
+    nl2sql_history: list[dict] = []
+    rag_history:    list[dict] = []
 
     try:
         rows = _get_ch().query(f"""

@@ -173,7 +173,7 @@ def _parse_statement(stmt: str, source_file: str) -> tuple[list[Node], list[Edge
             name=defined_node,
             db=db,
             table=tbl,
-            node_type=node_type,
+            node_type=node_type or "table",
             source_file=source_file,
         ))
 

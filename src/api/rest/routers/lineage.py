@@ -14,7 +14,7 @@ async def query_lineage(req: LineageRequest):
         return {"result": get_upstream(req.table_name)}
     elif req.direction == "downstream":
         return {"result": get_downstream(req.table_name)}
-    return {"result": get_lineage(req.table_name)}
+    return {"result": get_lineage()}
 
 @router.get("/impact/{table_name}")
 async def impact_analysis(table_name: str):

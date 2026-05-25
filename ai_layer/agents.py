@@ -82,7 +82,7 @@ def _get_llm():
 # Supervisor 节点
 # ══════════════════════════════════════════════════════════════
 
-def supervisor_node(state: AgentState) -> AgentState:
+def supervisor_node(state: AgentState) -> dict:
     llm = _get_llm()
     context_parts = [f'用户目标：{state["goal"]}']
     if state['agent_outputs']:
@@ -128,7 +128,7 @@ def route_supervisor(state: AgentState) -> str:
 def _make_agent_node(agent_name: str, system_desc: str, tools: list):
     react_agent = create_react_agent(_get_llm(), tools)
 
-    def node(state: AgentState) -> AgentState:
+    def node(state: AgentState) -> dict:
         log.info('%s 执行中...', agent_name)
         goal = state['goal']
         context = ''
@@ -154,7 +154,7 @@ def _make_agent_node(agent_name: str, system_desc: str, tools: list):
 # 合成节点：生成最终报告
 # ══════════════════════════════════════════════════════════════
 
-def synthesize_node(state: AgentState) -> AgentState:
+def synthesize_node(state: AgentState) -> dict:
     llm = _get_llm()
     collected = '\n\n'.join(
         f'【{o["agent"]}】\n{o["output"]}' for o in state['agent_outputs']

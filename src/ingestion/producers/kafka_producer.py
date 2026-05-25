@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 
 try:
-    from kafka import KafkaProducer as _KafkaProducer
+    from kafka import KafkaProducer as _KafkaProducer  # type: ignore[attr-defined]
     _KAFKA_AVAILABLE = True
 except ImportError:
     _KafkaProducer = None  # type: ignore[assignment]

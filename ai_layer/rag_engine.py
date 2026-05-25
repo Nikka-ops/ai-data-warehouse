@@ -257,7 +257,8 @@ def _score_groundedness(answer: str, docs_context: str) -> float:
             max_tokens=10,
         )
         raw = resp.choices[0].message.content.strip()
-        score = float(re.search(r'[0-9]*\.?[0-9]+', raw).group())
+        m = re.search(r'[0-9]*\.?[0-9]+', raw)
+        score = float(m.group()) if m else 0.5
         score = max(0.0, min(1.0, score))
         log.info('[接地性评分] %.2f', score)
         return score

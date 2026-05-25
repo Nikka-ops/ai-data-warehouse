@@ -346,3 +346,21 @@ def notify(alert, decision: dict):
             "通知发送失败 alert_id=%s: %s",
             getattr(alert, 'alert_id', '?'), e,
         )
+
+
+def send_notification(title: str, content: str, severity: str = "P3") -> None:
+    """简化接口：直接用标题/内容/级别发送通知，无需构造告警对象。"""
+    from types import SimpleNamespace
+    alert = SimpleNamespace(
+        alert_id='manual',
+        title=title,
+        detail=content,
+        severity=severity,
+        metric_name='',
+        current_value=0.0,
+        threshold_value=0.0,
+        fired_at=datetime.now(),
+        source='agent_tool',
+        category='',
+    )
+    notify(alert, {'skill': 'manual', 'action': '', 'result': content, 'success': True})

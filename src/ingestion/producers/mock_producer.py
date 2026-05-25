@@ -98,7 +98,7 @@ class BrazilianEcommerceSimulator:
         """生成一条符合真实分布的模拟订单事件"""
         state   = _weighted_choice(_STATES)
         cat     = _weighted_choice({k: v["weight"] for k, v in _CATEGORIES.items()})
-        price   = round(random.uniform(*_CATEGORIES[cat]["price"]), 2)
+        price   = round(random.uniform(*_CATEGORIES[cat]["price"]), 2)  # type: ignore[misc]
         # 5% 概率产生轻微时间延迟（模拟网络抖动）
         delay   = timedelta(minutes=random.randint(0, 5)) if random.random() < 0.05 else timedelta(0)
         product = random.choice(_HOT_PRODUCTS if random.random() < 0.8 else _LONG_PRODUCTS)

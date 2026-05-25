@@ -8,7 +8,7 @@ import os
 import sys
 import json
 from datetime import datetime
-from typing import TypedDict
+from typing import Any, TypedDict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
@@ -40,7 +40,7 @@ except ImportError as _llm_err:
 
 # ── 图状态定义 ─────────────────────────────────────────────────
 
-class AlertState(TypedDict):
+class AlertState(TypedDict, total=False):
     alert: dict                  # AlertEvent 序列化为 dict
     diagnose_result: dict        # diagnose_task 输出
     lineage_result: dict         # trace_lineage_impact 输出
@@ -54,6 +54,8 @@ class AlertState(TypedDict):
     retry_count: int             # 重试次数
     escalated: bool              # 是否升级（超过最大重试）
     messages: list               # 中间日志
+    _ch: Any                     # 运行时注入：ClickHouse client
+    _gate: Any                   # 运行时注入：SafetyGate
 
 
 # ── 条件边函数 ─────────────────────────────────────────────────
@@ -488,9 +490,9 @@ class _DictAlert:
         self.__dict__.update(d)
         # 确保列表字段存在
         if not hasattr(self, "affected_tables"):
-            self.affected_tables = []
+            self.affected_tables: list[str] = []
         if not hasattr(self, "downstream_tables"):
-            self.downstream_tables = []
+            self.downstream_tables: list[str] = []
         if not hasattr(self, "fired_at"):
             self.fired_at = datetime.now()
 
@@ -513,10 +515,8 @@ class AlertOrchestrator:
         def _inject(fn):
             def wrapper(state: AlertState) -> dict:
                 # 注入运行时依赖
-                state = dict(state)
-                state["_ch"] = ch
-                state["_gate"] = gate
-                return fn(state)
+                injected: AlertState = {**state, "_ch": ch, "_gate": gate}  # type: ignore[misc]
+                return fn(injected)
             wrapper.__name__ = fn.__name__
             return wrapper
 

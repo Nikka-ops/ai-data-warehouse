@@ -143,7 +143,7 @@ def _detect_psi(ch) -> list:
     查询 feature_store.drift_stats 中已标记漂移的特征，
     每个特征产出一个 P3 告警。
     """
-    alerts = []
+    alerts: list = []
     try:
         rows = ch.query(_PSI_SQL).result_rows
     except Exception as exc:
