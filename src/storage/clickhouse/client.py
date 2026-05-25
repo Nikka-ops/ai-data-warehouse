@@ -4,10 +4,9 @@ ClickHouse 客户端封装，提供简单工厂和带懒加载连接池的封装
 """
 
 from __future__ import annotations
-from typing import Any
 
 import importlib.util
-_PANDAS_AVAILABLE = importlib.util.find_spec("pandas") is not None
+from typing import Any
 
 try:
     import clickhouse_connect
@@ -19,6 +18,7 @@ except ImportError:
 from src.common.config import cfg
 from src.common.utils import get_logger
 
+_PANDAS_AVAILABLE = importlib.util.find_spec("pandas") is not None
 log = get_logger("storage.clickhouse")
 
 

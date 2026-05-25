@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Alert Engine 单元测试"""
 import pytest
-from unittest.mock import MagicMock, patch
 import sys
 sys.path.insert(0, '/home/user/ai-data-warehouse')
 

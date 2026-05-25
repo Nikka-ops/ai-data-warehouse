@@ -2,7 +2,6 @@
 """端到端流水线测试"""
 import pytest
 import os
-import time
 
 pytestmark = pytest.mark.skipif(
     os.getenv("E2E_TEST") != "1",

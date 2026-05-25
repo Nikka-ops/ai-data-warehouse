@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """NL2SQL 安全校验单元测试"""
 import pytest
-import sys, os
+import sys
 sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 # 测试 SQL 安全拦截

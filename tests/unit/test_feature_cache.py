@@ -8,13 +8,11 @@ class TestFeatureCache:
     def setup_method(self):
         try:
             import fakeredis
-            import redis
             self.fake_redis = fakeredis.FakeRedis(decode_responses=True)
         except ImportError:
             pytest.skip("需要 fakeredis: pip install fakeredis")
 
     def test_set_and_get(self):
-        from unittest.mock import patch
         try:
             from src.storage.redis.feature_cache import FeatureCache
         except ImportError:
