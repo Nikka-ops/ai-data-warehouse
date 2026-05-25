@@ -7,7 +7,7 @@
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -137,8 +137,6 @@ def _parse_statement(stmt: str, source_file: str) -> tuple[list[Node], list[Edge
     """解析单条 SQL 语句，提取节点和边"""
     nodes: list[Node] = []
     edges: list[Edge] = []
-
-    upper = stmt.upper().lstrip()
 
     # ── 1. 判断语句类型，提取定义节点 ────────────────────────
 

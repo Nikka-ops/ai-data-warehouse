@@ -8,8 +8,7 @@ import os
 import sys
 import json
 from datetime import datetime
-from typing import TypedDict, Annotated, Sequence
-import operator
+from typing import TypedDict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
@@ -26,10 +25,9 @@ from ai_layer.alert_engine.skills import (
 from ai_layer.alert_engine.safety_gate import SafetyGate
 from ai_layer.alert_engine.notifier import notify
 
-log = get_logger('alert_engine.orchestrator')
-
-# ── LangGraph imports ──────────────────────────────────────────
 from langgraph.graph import StateGraph, END
+
+log = get_logger('alert_engine.orchestrator')
 
 # ── LLM import ────────────────────────────────────────────────
 try:
@@ -195,9 +193,9 @@ def plan_action(state: AlertState) -> dict:
             if plan_str.startswith("```"):
                 lines = plan_str.splitlines()
                 plan_str = "\n".join(
-                    l for l in lines if not l.strip().startswith("```")
+                    line for line in lines if not line.strip().startswith("```")
                 ).strip()
-            msgs.append(f"[plan_action] LLM 规划成功")
+            msgs.append("[plan_action] LLM 规划成功")
         except Exception as e:
             msgs.append(f"[plan_action] LLM 调用失败，降级到规则: {e}")
             plan_str = ""
@@ -219,7 +217,6 @@ def plan_action(state: AlertState) -> dict:
 
 def safety_check_node(state: AlertState) -> dict:
     """调用 SafetyGate.check() 进行安全检查"""
-    ch = state["_ch"]
     gate = state["_gate"]
     msgs = list(state.get("messages", []))
 
@@ -324,7 +321,7 @@ def verify_repair(state: AlertState) -> dict:
             "status_after": "unknown",
             "reason": f"修复操作本身失败: {repair.get('message', '')}",
         }
-        msgs.append(f"[verify_repair] 修复失败，跳过重诊断")
+        msgs.append("[verify_repair] 修复失败，跳过重诊断")
         return {
             "verify_result": result,
             "retry_count": state.get("retry_count", 0) + 1,

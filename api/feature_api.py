@@ -15,7 +15,9 @@
   GET  /features/drift/{group}                       特征漂移状态
   GET  /health                                       健康检查
 """
-import os, sys, json, time
+import os
+import sys
+import time
 from typing import Optional
 from datetime import datetime
 
@@ -168,7 +170,8 @@ async def build_dataset(req: DatasetBuildRequest, background: BackgroundTasks):
 
     def _run():
         from feature_store.dataset_builder import DatasetBuilder
-        import tempfile, os
+        import tempfile
+        import os
         out_path = os.path.join(tempfile.gettempdir(), f'{req.dataset_name}_{task_id}.parquet')
         builder = DatasetBuilder()
         result = builder.build(

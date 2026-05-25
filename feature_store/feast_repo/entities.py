@@ -1,7 +1,6 @@
 # Feast 实体定义 — 对应业务中的主键维度
 try:
     from feast import Entity
-    from feast.value_type import ValueType
 except ImportError:
     import warnings
     warnings.warn("feast 未安装，entities.py 仅作占位，请执行 pip install feast", stacklevel=1)

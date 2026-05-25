@@ -5,7 +5,10 @@
 结果写入 dws.realtime_forecast。
 """
 
-import os, sys, time, argparse
+import os
+import sys
+import time
+import argparse
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

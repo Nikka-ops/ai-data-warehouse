@@ -5,10 +5,15 @@
 真实数据分布：Pareto 商品热度、时段权重、品类价格合理区间
 """
 
-import json, random, time, uuid, argparse, math
+import json
+import random
+import time
+import uuid
+import argparse
 from datetime import datetime, timedelta
 from kafka import KafkaProducer
-import os, sys
+import os
+import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger

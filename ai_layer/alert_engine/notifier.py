@@ -208,7 +208,7 @@ def _build_dingtalk_card(alert, decision: dict) -> dict:
             "btns": [
                 {
                     "title": "查看详情",
-                    "actionURL": f"dingtalk://dingtalkclient/page/link?url=about:blank&pc_slide=false",
+                    "actionURL": "dingtalk://dingtalkclient/page/link?url=about:blank&pc_slide=false",
                 }
             ],
         },

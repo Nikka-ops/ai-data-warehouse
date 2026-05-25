@@ -4,7 +4,10 @@ NL2DDL：自然语言 → ClickHouse CREATE VIEW
 用户描述分析需求，AI 生成视图 DDL，确认后执行并注册到 stream.custom_views。
 """
 
-import os, sys, re, uuid
+import os
+import sys
+import re
+import uuid
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

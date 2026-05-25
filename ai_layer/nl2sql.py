@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """NL2SQL：自然语言 → 实时 ClickHouse SQL（Self-RAG 自我验证版）"""
-import json
 import os
 import re
 import sys

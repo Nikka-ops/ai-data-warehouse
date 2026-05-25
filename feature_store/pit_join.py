@@ -367,7 +367,7 @@ class PITJoiner:
             pandas.DataFrame: 完整的训练数据集
         """
         try:
-            import pandas as pd
+            import pandas  # noqa: F401
         except ImportError:
             raise RuntimeError('pandas 未安装，请执行 pip install pandas')
 
@@ -487,7 +487,6 @@ def generate_training_labels(
 
 if __name__ == '__main__':
     import pandas as pd
-    from datetime import timedelta
 
     # 构造示例标签数据
     sample_labels = pd.DataFrame({
