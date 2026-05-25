@@ -40,10 +40,18 @@ class KafkaProducer(BaseProducer):
             compression_type="gzip",   # gzip 压缩减少网络带宽
         )
 
-    def produce(self, topic: str, key: str, value: dict) -> None:
-        """发送消息，异步回调记录错误"""
+    def produce(self, topic: str, key: str, value: dict,
+               sync: bool = False, timeout: float = 10.0) -> None:
+        """发送消息。
+
+        sync=True 时阻塞等待 broker 确认，失败则抛出 KafkaError（适合需要强可靠性的场景）。
+        sync=False（默认）时异步发送，失败仅记录日志——调用方无法感知投递结果。
+        """
         future = self._producer.send(topic, key=key, value=value)
-        future.add_errback(lambda exc: log.error("Kafka 发送失败 topic=%s：%s", topic, exc))
+        if sync:
+            future.get(timeout=timeout)  # 阻塞确认，失败抛出异常
+        else:
+            future.add_errback(lambda exc: log.error("Kafka 发送失败 topic=%s：%s", topic, exc))
 
     def flush(self) -> None:
         """等待所有 in-flight 消息发送完成"""

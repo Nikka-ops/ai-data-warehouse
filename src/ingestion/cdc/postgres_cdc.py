@@ -8,6 +8,7 @@ Debezium PostgreSQL CDC 配置生成器
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 
 from src.common.utils import get_logger
@@ -73,6 +74,15 @@ class PostgresCDCConfig:
             headers={"Content-Type": "application/json"},
         )
         log.info("注册 PostgreSQL CDC connector：%s → %s", self.server_name, connect_url)
-        with urllib.request.urlopen(req) as resp:
-            body = resp.read().decode()
-            log.info("注册成功：%s", body[:200])
+        try:
+            with urllib.request.urlopen(req) as resp:
+                body = resp.read().decode()
+                log.info("注册成功：%s", body[:200])
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409:
+                log.info("Connector %s 已存在（409 Conflict），跳过注册", self.server_name)
+            else:
+                body = exc.read().decode(errors="replace")
+                raise RuntimeError(
+                    f"注册 connector {self.server_name} 失败 (HTTP {exc.code})：{body[:200]}"
+                ) from exc

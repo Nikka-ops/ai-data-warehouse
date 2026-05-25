@@ -38,7 +38,10 @@ class LongTermMemory:
         coll = self._get_collection()
         if coll:
             import hashlib
-            doc_id = hashlib.md5(content.encode()).hexdigest()[:16]
+            # 使用完整 SHA-256（256 位）作为 ID，避免截断 MD5 的碰撞风险
+            # metadata 也参与哈希，防止相同内容不同 session 的记录互相覆盖
+            meta_str = str(sorted((metadata or {}).items()))
+            doc_id = hashlib.sha256((content + meta_str).encode()).hexdigest()
             coll.upsert(documents=[content], ids=[doc_id], metadatas=[metadata or {}])
 
     def search(self, query: str, top_k: int = 3) -> list[str]:
