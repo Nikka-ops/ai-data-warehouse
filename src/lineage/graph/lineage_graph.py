@@ -22,17 +22,17 @@ class LineageGraph:
 
     def add_node(self, node: LineageNode):
         self._nodes[node.id] = node
-        if self._g:
+        if self._g is not None:
             self._g.add_node(node.id, **vars(node))
 
     def add_edge(self, edge: LineageEdge):
         self._edges.append(edge)
-        if self._g:
+        if self._g is not None:
             self._g.add_edge(edge.source, edge.target, edge_type=edge.edge_type.value)
 
-    def get_upstream(self, node_id: str, depth: int = 3) -> list[str]:
+    def get_upstream(self, node_id: str, depth: int = 5) -> list[str]:
         """返回 node_id 在 depth 跳以内的所有上游节点（BFS，严格遵守 depth 参数）"""
-        if not self._g or node_id not in self._g:
+        if self._g is None or node_id not in self._g:
             return []
         visited: set[str] = set()
         frontier = {node_id}
@@ -48,9 +48,9 @@ class LineageGraph:
                 break
         return list(visited)
 
-    def get_downstream(self, node_id: str, depth: int = 3) -> list[str]:
+    def get_downstream(self, node_id: str, depth: int = 5) -> list[str]:
         """返回 node_id 在 depth 跳以内的所有下游节点（BFS，严格遵守 depth 参数）"""
-        if not self._g or node_id not in self._g:
+        if self._g is None or node_id not in self._g:
             return []
         visited: set[str] = set()
         frontier = {node_id}
