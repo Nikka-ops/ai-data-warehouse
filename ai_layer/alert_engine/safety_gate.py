@@ -32,7 +32,7 @@ RATE_LIMITS: dict[str, int] = {
 
 
 class SafetyGate:
-    def __init__(self, ch):
+    def __init__(self, ch=None):
         self.ch = ch
 
     def check(self, action_type: str, target: str) -> tuple[bool, str]:
