@@ -5,10 +5,15 @@
 真实数据分布：Pareto 商品热度、时段权重、品类价格合理区间
 """
 
-import json, random, time, uuid, argparse, math
+import json
+import random
+import time
+import uuid
+import argparse
 from datetime import datetime, timedelta
-from kafka import KafkaProducer
-import os, sys
+from kafka import KafkaProducer  # type: ignore[attr-defined]
+import os
+import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
@@ -82,8 +87,8 @@ def _base_order(status_weights=None) -> dict:
     state    = _weighted_choice(STATES)
     city     = random.choice(CITIES.get(state, ['Unknown']))
     cat      = _weighted_choice({k: v['weight'] for k, v in CATEGORIES.items()})
-    price    = round(random.uniform(*CATEGORIES[cat]['price']), 2)
-    freight  = round(random.uniform(*CATEGORIES[cat]['freight']), 2)
+    price    = round(random.uniform(*CATEGORIES[cat]['price']), 2)  # type: ignore[misc]
+    freight  = round(random.uniform(*CATEGORIES[cat]['freight']), 2)  # type: ignore[misc]
     delay    = timedelta(minutes=random.randint(0, 5)) if random.random() < 0.05 else timedelta(0)
     return {
         'order_id':         str(uuid.uuid4()),
@@ -143,10 +148,10 @@ def gen_peak() -> tuple[dict, dict | None]:
 def gen_flash_sale() -> tuple[dict, dict | None]:
     """限时秒杀：高并发 + 高取消率 + 单一品类集中 + 价格偏低"""
     flash_cat = random.choice(['beleza_saude', 'utilidades_domesticas', 'brinquedos'])
-    price_lo, price_hi = CATEGORIES[flash_cat]['price']
+    price_lo, price_hi = CATEGORIES[flash_cat]['price']  # type: ignore[misc]
     # 秒杀价格区间下浮50%
-    price   = round(random.uniform(price_lo, price_lo + (price_hi - price_lo) * 0.5), 2)
-    freight = round(random.uniform(*CATEGORIES[flash_cat]['freight']), 2)
+    price   = round(random.uniform(price_lo, price_lo + (price_hi - price_lo) * 0.5), 2)  # type: ignore[has-type]
+    freight = round(random.uniform(*CATEGORIES[flash_cat]['freight']), 2)  # type: ignore[misc]
     order = _base_order(status_weights=[0.10, 0.06, 0.08, 0.12, 0.44, 0.20])  # 取消率高
     order['product_category'] = flash_cat
     order['price']            = price

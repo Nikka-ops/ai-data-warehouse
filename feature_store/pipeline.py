@@ -8,8 +8,10 @@
   一次性：python feature_store/pipeline.py --group user_behavior
   持续刷新：python feature_store/pipeline.py --loop 300
 """
-import os, sys, time, argparse
-from datetime import datetime
+import os
+import sys
+import time
+import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg

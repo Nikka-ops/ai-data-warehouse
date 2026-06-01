@@ -15,5 +15,5 @@ class BaseAgent(ABC):
         """执行 Agent 任务，返回 {output: str, intermediate_steps: list}"""
         ...
 
-    def _wrap_result(self, output: str, steps: list = None) -> dict:
+    def _wrap_result(self, output: str, steps: list | None = None) -> dict:
         return {"output": output, "intermediate_steps": steps or []}

@@ -21,7 +21,11 @@ TB 级数据估算（sql 模式）：
   # TB 级（ClickHouse 压缩后数十GB，原始等效约100GB）
   python batch/historical_loader.py --mode sql --rows 500000000
 """
-import os, sys, uuid, random, argparse
+import os
+import sys
+import uuid
+import random
+import argparse
 from datetime import datetime, date, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

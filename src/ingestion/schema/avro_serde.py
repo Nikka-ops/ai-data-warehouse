@@ -15,7 +15,7 @@ try:
     _BACKEND = "fastavro"
 except ImportError:
     fastavro = None  # type: ignore[assignment]
-    _BACKEND = None
+    _BACKEND = None  # type: ignore[assignment]
 
 if _BACKEND is None:
     try:

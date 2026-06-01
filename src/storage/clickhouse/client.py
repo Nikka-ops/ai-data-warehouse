@@ -4,13 +4,9 @@ ClickHouse 客户端封装，提供简单工厂和带懒加载连接池的封装
 """
 
 from __future__ import annotations
-from typing import Any
 
-try:
-    import pandas as pd
-    _PANDAS_AVAILABLE = True
-except ImportError:
-    _PANDAS_AVAILABLE = False  # pandas 不可用时降级
+import importlib.util
+from typing import Any
 
 try:
     import clickhouse_connect
@@ -22,6 +18,7 @@ except ImportError:
 from src.common.config import cfg
 from src.common.utils import get_logger
 
+_PANDAS_AVAILABLE = importlib.util.find_spec("pandas") is not None
 log = get_logger("storage.clickhouse")
 
 
@@ -61,11 +58,17 @@ class ClickHouseClient:
         cols = result.column_names
         return [dict(zip(cols, row)) for row in result.result_set]
 
-    def execute(self, sql: str, data: Any = None) -> None:
-        """执行写入或 DDL 语句"""
+    def execute(self, sql: str, data: Any = None,
+               column_names: list[str] | None = None) -> None:
+        """执行 DDL/命令或批量写入。
+
+        DDL/命令：sql 为完整 SQL 语句，data=None。
+        批量写入：sql 为目标表名（如 'db.table'），data 为行数据列表。
+        """
         log.debug("执行写入/DDL：%s", sql[:200])
         if data is not None:
-            self.client.insert(sql, data)
+            # clickhouse_connect.insert(table, data, column_names=...) 第一参数为表名
+            self.client.insert(sql, data, column_names=column_names or [])
         else:
             self.client.command(sql)
 

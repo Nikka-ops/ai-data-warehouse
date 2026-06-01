@@ -8,8 +8,7 @@ import os
 import sys
 import json
 from datetime import datetime
-from typing import TypedDict, Annotated, Sequence
-import operator
+from typing import Any, TypedDict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
@@ -26,10 +25,9 @@ from ai_layer.alert_engine.skills import (
 from ai_layer.alert_engine.safety_gate import SafetyGate
 from ai_layer.alert_engine.notifier import notify
 
-log = get_logger('alert_engine.orchestrator')
-
-# ── LangGraph imports ──────────────────────────────────────────
 from langgraph.graph import StateGraph, END
+
+log = get_logger('alert_engine.orchestrator')
 
 # ── LLM import ────────────────────────────────────────────────
 try:
@@ -42,7 +40,7 @@ except ImportError as _llm_err:
 
 # ── 图状态定义 ─────────────────────────────────────────────────
 
-class AlertState(TypedDict):
+class AlertState(TypedDict, total=False):
     alert: dict                  # AlertEvent 序列化为 dict
     diagnose_result: dict        # diagnose_task 输出
     lineage_result: dict         # trace_lineage_impact 输出
@@ -56,6 +54,8 @@ class AlertState(TypedDict):
     retry_count: int             # 重试次数
     escalated: bool              # 是否升级（超过最大重试）
     messages: list               # 中间日志
+    _ch: Any                     # 运行时注入：ClickHouse client
+    _gate: Any                   # 运行时注入：SafetyGate
 
 
 # ── 条件边函数 ─────────────────────────────────────────────────
@@ -195,9 +195,9 @@ def plan_action(state: AlertState) -> dict:
             if plan_str.startswith("```"):
                 lines = plan_str.splitlines()
                 plan_str = "\n".join(
-                    l for l in lines if not l.strip().startswith("```")
+                    line for line in lines if not line.strip().startswith("```")
                 ).strip()
-            msgs.append(f"[plan_action] LLM 规划成功")
+            msgs.append("[plan_action] LLM 规划成功")
         except Exception as e:
             msgs.append(f"[plan_action] LLM 调用失败，降级到规则: {e}")
             plan_str = ""
@@ -219,7 +219,6 @@ def plan_action(state: AlertState) -> dict:
 
 def safety_check_node(state: AlertState) -> dict:
     """调用 SafetyGate.check() 进行安全检查"""
-    ch = state["_ch"]
     gate = state["_gate"]
     msgs = list(state.get("messages", []))
 
@@ -324,7 +323,7 @@ def verify_repair(state: AlertState) -> dict:
             "status_after": "unknown",
             "reason": f"修复操作本身失败: {repair.get('message', '')}",
         }
-        msgs.append(f"[verify_repair] 修复失败，跳过重诊断")
+        msgs.append("[verify_repair] 修复失败，跳过重诊断")
         return {
             "verify_result": result,
             "retry_count": state.get("retry_count", 0) + 1,
@@ -491,9 +490,9 @@ class _DictAlert:
         self.__dict__.update(d)
         # 确保列表字段存在
         if not hasattr(self, "affected_tables"):
-            self.affected_tables = []
+            self.affected_tables: list[str] = []
         if not hasattr(self, "downstream_tables"):
-            self.downstream_tables = []
+            self.downstream_tables: list[str] = []
         if not hasattr(self, "fired_at"):
             self.fired_at = datetime.now()
 
@@ -516,10 +515,8 @@ class AlertOrchestrator:
         def _inject(fn):
             def wrapper(state: AlertState) -> dict:
                 # 注入运行时依赖
-                state = dict(state)
-                state["_ch"] = ch
-                state["_gate"] = gate
-                return fn(state)
+                injected: AlertState = {**state, "_ch": ch, "_gate": gate}  # type: ignore[misc]
+                return fn(injected)
             wrapper.__name__ = fn.__name__
             return wrapper
 

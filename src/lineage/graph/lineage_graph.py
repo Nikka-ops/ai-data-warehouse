@@ -22,23 +22,49 @@ class LineageGraph:
 
     def add_node(self, node: LineageNode):
         self._nodes[node.id] = node
-        if self._g:
+        if self._g is not None:
             self._g.add_node(node.id, **vars(node))
 
     def add_edge(self, edge: LineageEdge):
         self._edges.append(edge)
-        if self._g:
+        if self._g is not None:
             self._g.add_edge(edge.source, edge.target, edge_type=edge.edge_type.value)
 
-    def get_upstream(self, node_id: str, depth: int = 3) -> list[str]:
-        if not self._g or node_id not in self._g:
+    def get_upstream(self, node_id: str, depth: int = 5) -> list[str]:
+        """返回 node_id 在 depth 跳以内的所有上游节点（BFS，严格遵守 depth 参数）"""
+        if self._g is None or node_id not in self._g:
             return []
-        return list(nx.ancestors(self._g, node_id))
+        visited: set[str] = set()
+        frontier = {node_id}
+        for _ in range(depth):
+            next_frontier: set[str] = set()
+            for n in frontier:
+                for pred in self._g.predecessors(n):
+                    if pred not in visited and pred != node_id:
+                        visited.add(pred)
+                        next_frontier.add(pred)
+            frontier = next_frontier
+            if not frontier:
+                break
+        return list(visited)
 
-    def get_downstream(self, node_id: str, depth: int = 3) -> list[str]:
-        if not self._g or node_id not in self._g:
+    def get_downstream(self, node_id: str, depth: int = 5) -> list[str]:
+        """返回 node_id 在 depth 跳以内的所有下游节点（BFS，严格遵守 depth 参数）"""
+        if self._g is None or node_id not in self._g:
             return []
-        return list(nx.descendants(self._g, node_id))
+        visited: set[str] = set()
+        frontier = {node_id}
+        for _ in range(depth):
+            next_frontier: set[str] = set()
+            for n in frontier:
+                for succ in self._g.successors(n):
+                    if succ not in visited and succ != node_id:
+                        visited.add(succ)
+                        next_frontier.add(succ)
+            frontier = next_frontier
+            if not frontier:
+                break
+        return list(visited)
 
     def get_impact_score(self, node_id: str) -> float:
         """节点的下游影响评分（基于下游节点数量）"""

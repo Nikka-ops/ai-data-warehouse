@@ -5,7 +5,6 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 from pyiceberg.catalog import load_catalog
-from pyiceberg.schema import Schema
 from pyiceberg.types import (
     BooleanType, DateType, DoubleType, FloatType,
     IntegerType, LongType, StringType, TimestampType,

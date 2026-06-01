@@ -24,7 +24,7 @@ import os
 import sys
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -559,4 +559,4 @@ if __name__ == '__main__':
 
     if reports:
         monitor.write_drift_stats(reports)
-        print(f'\n统计已写入 feature_store.drift_stats')
+        print('\n统计已写入 feature_store.drift_stats')

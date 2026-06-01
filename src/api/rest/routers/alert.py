@@ -59,8 +59,8 @@ async def diagnose_alert(req: AlertRequest):
             self.detail = r.detail
             self.metric_name = r.metric_name
             self.current_value = r.current_value
-            self.affected_tables = []
-            self.downstream_tables = []
+            self.affected_tables: list[str] = []
+            self.downstream_tables: list[str] = []
             self.fired_at = datetime.now()
 
     ch = get_ch_client()

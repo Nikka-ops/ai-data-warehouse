@@ -52,12 +52,6 @@ def _detect_sigma(ch) -> list:
         metric_name = cfg_item["metric_name"]
 
         # 查基线数据（逐分钟粒度）
-        baseline_sql = (
-            f"SELECT avg({col})"
-            f" FROM dws.realtime_minute_stats"
-            f" WHERE window_start >= now() - INTERVAL {_BASELINE_MINUTES} MINUTE"
-            f"   AND window_start <  now() - INTERVAL {_CURRENT_MINUTES} MINUTE"
-        )
         baseline_vals_sql = (
             f"SELECT {col}"
             f" FROM dws.realtime_minute_stats"
@@ -149,7 +143,7 @@ def _detect_psi(ch) -> list:
     查询 feature_store.drift_stats 中已标记漂移的特征，
     每个特征产出一个 P3 告警。
     """
-    alerts = []
+    alerts: list = []
     try:
         rows = ch.query(_PSI_SQL).result_rows
     except Exception as exc:

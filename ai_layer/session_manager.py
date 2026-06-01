@@ -3,7 +3,9 @@
 会话管理器：将多轮对话历史持久化到 ClickHouse stream.chat_sessions。
 支持跨浏览器会话的上下文恢复。
 """
-import os, sys, uuid
+import os
+import sys
+import uuid
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -102,9 +104,9 @@ def load_session(session_id: str) -> dict:
         'rag_history':    [...],   # 注入 RAG messages
       }
     """
-    chat_messages  = []
-    nl2sql_history = []
-    rag_history    = []
+    chat_messages:  list[dict] = []
+    nl2sql_history: list[dict] = []
+    rag_history:    list[dict] = []
 
     try:
         rows = _get_ch().query(f"""

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """Kappa 架构 AI 分析 Multi-Agent（LangGraph Supervisor 模式）"""
-import os, sys, operator, json
-from typing import TypedDict, Annotated, Literal
+import os
+import sys
+import operator
+import json
+from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -15,7 +18,6 @@ from ai_layer.tools import (
     generate_insight, get_etl_status, get_forecast,
     get_proactive_insights, get_kappa_status, trigger_kappa_replay,
     get_remediation_status, get_alert_investigations,
-    ALL_TOOLS,
 )
 
 log = get_logger('agents')
@@ -80,7 +82,7 @@ def _get_llm():
 # Supervisor 节点
 # ══════════════════════════════════════════════════════════════
 
-def supervisor_node(state: AgentState) -> AgentState:
+def supervisor_node(state: AgentState) -> dict:
     llm = _get_llm()
     context_parts = [f'用户目标：{state["goal"]}']
     if state['agent_outputs']:
@@ -126,7 +128,7 @@ def route_supervisor(state: AgentState) -> str:
 def _make_agent_node(agent_name: str, system_desc: str, tools: list):
     react_agent = create_react_agent(_get_llm(), tools)
 
-    def node(state: AgentState) -> AgentState:
+    def node(state: AgentState) -> dict:
         log.info('%s 执行中...', agent_name)
         goal = state['goal']
         context = ''
@@ -152,7 +154,7 @@ def _make_agent_node(agent_name: str, system_desc: str, tools: list):
 # 合成节点：生成最终报告
 # ══════════════════════════════════════════════════════════════
 
-def synthesize_node(state: AgentState) -> AgentState:
+def synthesize_node(state: AgentState) -> dict:
     llm = _get_llm()
     collected = '\n\n'.join(
         f'【{o["agent"]}】\n{o["output"]}' for o in state['agent_outputs']

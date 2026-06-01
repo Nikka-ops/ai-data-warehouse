@@ -5,7 +5,12 @@
 用 LLM 生成自然语言数据故事，写入 stream.proactive_insights。
 """
 
-import os, sys, json, uuid, time, argparse
+import os
+import sys
+import json
+import uuid
+import time
+import argparse
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -135,7 +140,6 @@ def _analyze_trends(data: dict) -> list[dict]:
 
     # 取消率信号
     if data.get('today'):
-        cancel_rows = []
         try:
             ch = _get_ch()
             r = ch.query("""

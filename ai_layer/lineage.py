@@ -7,7 +7,7 @@
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -138,8 +138,6 @@ def _parse_statement(stmt: str, source_file: str) -> tuple[list[Node], list[Edge
     nodes: list[Node] = []
     edges: list[Edge] = []
 
-    upper = stmt.upper().lstrip()
-
     # ── 1. 判断语句类型，提取定义节点 ────────────────────────
 
     defined_node: Optional[str] = None   # 本语句定义的对象（如 CREATE TABLE xyz）
@@ -175,7 +173,7 @@ def _parse_statement(stmt: str, source_file: str) -> tuple[list[Node], list[Edge
             name=defined_node,
             db=db,
             table=tbl,
-            node_type=node_type,
+            node_type=node_type or "table",
             source_file=source_file,
         ))
 

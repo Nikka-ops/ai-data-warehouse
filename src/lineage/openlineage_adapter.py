@@ -24,5 +24,6 @@ class OpenLineageAdapter:
         }
 
     def _gen_run_id(self, job_name: str) -> str:
-        import uuid, hashlib
+        import hashlib
+        import uuid
         return str(uuid.UUID(hashlib.md5(job_name.encode()).hexdigest()))

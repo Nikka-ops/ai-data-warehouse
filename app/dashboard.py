@@ -6,13 +6,13 @@ AI 智能查询界面
 - Agent：自主多步分析（异常检测、运营快报、自由分析）
 BI 可视化由 Apache Superset 提供（http://localhost:8088）。
 """
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 
 from config import cfg
 
@@ -795,7 +795,9 @@ elif page == "🗄️ 特征存储":
             if not ds_name.strip() or not label_sql.strip() or not feat_groups:
                 st.warning("请填写数据集名称、标签 SQL，并选择至少一个特征组")
             else:
-                import json, urllib.request, urllib.error
+                import json
+                import urllib.request
+                import urllib.error
                 payload = json.dumps({
                     "dataset_name": ds_name.strip(),
                     "label_sql": label_sql.strip(),

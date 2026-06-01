@@ -13,7 +13,11 @@ Kappa 架构：Flink 统一流处理作业
                                     ► dws.kappa_hourly_agg（回放模式小时聚合）
 """
 
-import os, sys, json, time, logging, uuid
+import os
+import sys
+import json
+import time
+import uuid
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
@@ -214,8 +218,8 @@ def run_flink_job(startup_mode: str = 'latest-offset'):
     ]:
         t_env.execute_sql(ddl)
 
-    stats_job = t_env.execute_sql(FLINK_MINUTE_AGG_SQL)
-    dwd_job   = t_env.execute_sql(FLINK_DWD_JOIN_SQL)
+    t_env.execute_sql(FLINK_MINUTE_AGG_SQL)
+    t_env.execute_sql(FLINK_DWD_JOIN_SQL)
     log.info('Flink 作业已提交（%s 模式）', startup_mode)
 
 
@@ -439,7 +443,6 @@ def run_python_realtime():
                     tps = [TopicPartition(cfg.orders_topic, p) for p in partitions]
                     end_offsets = consumer.end_offsets(tps)
                     pos = {tp: consumer.position(tp) for tp in tps}
-                    total_lag = sum(max(0, end_offsets[tp] - pos[tp]) for tp in tps)
                     total_end = sum(end_offsets[tp] for tp in tps)
                     total_pos = sum(pos[tp] for tp in tps)
                     _write_lag(ch, 'kappa_realtime', cfg.orders_topic, 0, total_pos, total_end)

@@ -8,8 +8,14 @@
   python ai_etl/ai_etl_agent.py --loop 60   # 每60秒循环一次
 """
 
-import os, sys, json, uuid, time, re, argparse
-from datetime import datetime, timedelta, timezone
+import os
+import sys
+import json
+import uuid
+import time
+import re
+import argparse
+from datetime import datetime, timedelta
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -612,7 +618,7 @@ class AIETLAgent:
         """持续循环运行，每隔 interval_seconds 秒执行一轮"""
         log.info('AI ETL Agent 进入循环模式，间隔 %ds', interval_seconds)
         while True:
-            result = self.run_once()
+            self.run_once()
             log.info('下次运行将在 %ds 后...', interval_seconds)
             time.sleep(interval_seconds)
 

@@ -49,7 +49,7 @@ def diagnose_task(ch, target: str) -> dict:
 def _diagnose_table(ch, table: str, result: dict) -> dict:
     try:
         # 尝试查询最近写入时间和行数
-        rows = ch.query(
+        ch.query(
             f"SELECT count() AS cnt, max(toDateTime(now())) AS ts FROM {table} LIMIT 1"
         )
         # 更精准：如果表有时间戳字段就用，否则只看行数
@@ -92,7 +92,7 @@ def _diagnose_table(ch, table: str, result: dict) -> dict:
                     result["status"] = "healthy"
                     result["details"] = f"表 {table} 数据正常，行数 {row_count}，最近写入 {last_write}"
                     result["recommended_action"] = ""
-            except Exception as e:
+            except Exception:
                 result["status"] = "healthy"
                 result["details"] = f"表 {table} 行数 {row_count}"
                 result["recommended_action"] = ""

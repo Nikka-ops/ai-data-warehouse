@@ -9,11 +9,15 @@ async def natural_language_query(req: QueryRequest):
     import sys
     import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
-    from ai_layer.nl2sql import nl2sql_query
-    result = nl2sql_query(req.question)
+    from ai_layer.nl2sql import nl2sql  # 函数名为 nl2sql，非 nl2sql_query
+    result = nl2sql(req.question)
+    # nl2sql 返回 data 为 pd.DataFrame，需转换为 list[dict]
+    data = result.get("data", [])
+    if hasattr(data, "to_dict"):
+        data = data.to_dict(orient="records")
     return QueryResponse(
         sql=result.get("sql", ""),
-        data=result.get("data", []),
+        data=data,
         row_count=result.get("row_count", 0),
         elapsed_ms=result.get("elapsed_ms", 0),
         insight=result.get("insight", ""),
@@ -23,8 +27,14 @@ async def natural_language_query(req: QueryRequest):
 @router.post("/sql")
 async def raw_sql_query(sql: str):
     """直接执行 SQL（仅 SELECT）"""
-    if not sql.strip().upper().startswith("SELECT"):
-        raise HTTPException(400, "只允许 SELECT 语句")
+    import sys
+    import os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
+    from ai_layer.nl2sql import validate_sql
+    try:
+        validate_sql(sql)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     from src.api.rest.dependencies import get_ch_client
     ch = get_ch_client()
     result = ch.query(sql)

@@ -10,10 +10,12 @@
 
 这是 AI 数仓区别于传统数仓的核心：系统主动参与特征发现
 """
-import os, sys, json, re, yaml
+import os
+import sys
+import json
+import re
+import yaml
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
@@ -181,8 +183,7 @@ class AutoFeatureEngineer:
         try:
             self._ch.query(f"EXPLAIN {sql.strip().rstrip(';')} LIMIT 0")
             return True, sql
-        except Exception as e:
-            error_str = str(e)
+        except Exception:
             # 尝试让 LLM 修复
             try:
                 from openai import OpenAI
