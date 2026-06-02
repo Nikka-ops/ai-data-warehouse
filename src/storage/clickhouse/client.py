@@ -22,7 +22,7 @@ _PANDAS_AVAILABLE = importlib.util.find_spec("pandas") is not None
 log = get_logger("storage.clickhouse")
 
 
-def get_client():
+def get_client(connect_timeout: int = 10, send_receive_timeout: int = 60):
     """获取 ClickHouse 客户端（简单工厂）"""
     if not _CH_AVAILABLE:
         raise ImportError("clickhouse_connect 未安装，请执行 pip install clickhouse-connect")
@@ -31,6 +31,8 @@ def get_client():
         port=cfg.ch_port,
         username=cfg.ch_user,
         password=cfg.ch_password,
+        connect_timeout=connect_timeout,
+        send_receive_timeout=send_receive_timeout,
     )
 
 

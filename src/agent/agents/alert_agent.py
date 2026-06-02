@@ -10,11 +10,8 @@ class AlertAgent(BaseAgent):
 
     def run(self, goal: str) -> dict:
         from ai_layer.alert_engine.aggregator import AlertAggregator
-        import clickhouse_connect
-        from src.common.config import cfg
-        ch = clickhouse_connect.get_client(
-            host=cfg.ch_host, port=cfg.ch_port,
-            username=cfg.ch_user, password=cfg.ch_password)
+        from src.storage.clickhouse.client import get_client
+        ch = get_client()
         agg = AlertAggregator()
         alerts = agg.run_all_detectors(ch)
         summary = f"检测到 {len(alerts)} 条告警：" + ", ".join(a.title for a in alerts[:5])
