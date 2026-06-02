@@ -4,7 +4,6 @@
 使用 numpy 线性回归外推预测未来值，不引入 statsmodels 等新依赖。
 """
 
-import sys
 import time
 
 

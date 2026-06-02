@@ -15,25 +15,17 @@
   )
 """
 import os
-import sys
 import uuid
 from datetime import datetime
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client
 
 log = get_logger('dataset_builder')
 
 
-@ch_retry
 def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=120,
-    )
+    return get_ch_client(send_receive_timeout=120)
 
 
 class DatasetBuilder:

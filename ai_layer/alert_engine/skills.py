@@ -3,8 +3,6 @@
 告警引擎可执行技能
 每个技能接受 ch（ClickHouse client）及业务参数，返回结构化 dict。
 """
-import os
-import sys
 from datetime import datetime, timezone
 
 

@@ -11,29 +11,17 @@
   4. 记录特征血缘（source_table → feature）
 """
 import os
-import sys
 import uuid
 import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client as _get_ch
 
 log = get_logger('feature_registry')
 _FEATURES_DIR = os.path.join(os.path.dirname(__file__), '..', 'features')
-
-
-@ch_retry
-def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
 
 
 class FeatureRegistry:

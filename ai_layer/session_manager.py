@@ -3,25 +3,17 @@
 会话管理器：将多轮对话历史持久化到 ClickHouse stream.chat_sessions。
 支持跨浏览器会话的上下文恢复。
 """
-import os
 import uuid
 from datetime import datetime
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client
 
 log = get_logger('session_mgr')
 
 
-@ch_retry
 def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=5, send_receive_timeout=20,
-    )
+    return get_ch_client(connect_timeout=5, send_receive_timeout=20)
 
 
 def new_session_id() -> str:

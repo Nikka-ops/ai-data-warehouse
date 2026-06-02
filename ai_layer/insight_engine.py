@@ -5,16 +5,16 @@
 用 LLM 生成自然语言数据故事，写入 stream.proactive_insights。
 """
 
-import os
 import json
 import uuid
 import time
 import argparse
 from datetime import datetime, timedelta
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry, llm_retry
+from utils.retry import llm_retry
+from utils.ch_client import get_ch_client
+from config import cfg
 
 log = get_logger('insight_engine')
 
@@ -23,14 +23,8 @@ TREND_THRESHOLD   = 0.15   # 15% 变化触发趋势洞察
 ANOMALY_THRESHOLD = 0.40   # 40% 偏差触发异常洞察
 
 
-@ch_retry
 def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=30,
-    )
+    return get_ch_client(send_receive_timeout=30)
 
 
 # ── 数据采集 ──────────────────────────────────────────────────

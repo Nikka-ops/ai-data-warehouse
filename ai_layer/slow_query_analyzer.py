@@ -5,19 +5,17 @@
 调用 LLM 给出优化建议，存入 stream.slow_query_analysis。
 """
 
-import os
-import sys
 import json
 import time
 import re
 
 
-import clickhouse_connect
 from openai import OpenAI
 
 from config import cfg
 from utils.logger import get_logger
 from utils.retry import ch_retry, llm_retry
+from utils.ch_client import get_ch_client as _get_ch
 
 log = get_logger('slow_query_analyzer')
 
@@ -64,18 +62,6 @@ TTL analyzed_at + INTERVAL 30 DAY
 
 
 # ── ClickHouse 工具函数 ────────────────────────────────────────
-
-@ch_retry
-def _get_ch():
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host,
-        port=cfg.ch_port,
-        username=cfg.ch_user,
-        password=cfg.ch_password,
-        connect_timeout=10,
-        send_receive_timeout=60,
-    )
-
 
 @ch_retry
 def _ensure_table(ch):

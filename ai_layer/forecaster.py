@@ -5,14 +5,12 @@
 结果写入 dws.realtime_forecast。
 """
 
-import os
 import time
 import argparse
 from datetime import datetime, timedelta
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client
 
 log = get_logger('forecaster')
 
@@ -23,14 +21,8 @@ ALPHA     = 0.35  # 水平平滑系数
 BETA      = 0.10  # 趋势平滑系数
 
 
-@ch_retry
 def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=30,
-    )
+    return get_ch_client(send_receive_timeout=30)
 
 
 # ── Holt 双指数平滑 ───────────────────────────────────────────

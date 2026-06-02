@@ -1,25 +1,14 @@
 # -*- coding: utf-8 -*-
 """Agent 工具定义（实时架构，唯一来源）"""
-import os
 import re
 from datetime import datetime
-import clickhouse_connect
 from langchain.tools import tool
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client as _get_ch
+from config import cfg
 
 log = get_logger('tools')
-
-
-@ch_retry
-def _get_ch():
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
 
 
 def _validate_sql(sql: str) -> str | None:

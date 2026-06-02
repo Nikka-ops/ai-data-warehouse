@@ -8,7 +8,6 @@
   python -m ai_layer.alert_engine.main --interval 30
   python -m ai_layer.alert_engine.main --once
 """
-import os
 import sys
 import time
 

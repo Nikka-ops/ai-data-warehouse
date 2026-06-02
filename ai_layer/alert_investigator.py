@@ -29,9 +29,10 @@ import subprocess
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry, llm_retry
+from utils.retry import llm_retry
+from utils.ch_client import get_ch_client as _get_ch
+from config import cfg
 
 log = get_logger('alert_investigator')
 
@@ -88,16 +89,6 @@ status 规则：
 # ─────────────────────────────────────────────────────────────
 # ClickHouse 连接
 # ─────────────────────────────────────────────────────────────
-
-@ch_retry
-def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
-
 
 def _safe_query(ch, sql: str, default=None):
     try:

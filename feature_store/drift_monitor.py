@@ -20,16 +20,13 @@
   4. write_drift_stats：持久化统计结果到 feature_store.drift_stats
   5. run_drift_check_loop：定时运行完整监控流程
 """
-import os
-import sys
 import math
 import time
 from datetime import datetime
 from typing import Optional
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client
 
 log = get_logger('drift_monitor')
 
@@ -44,14 +41,8 @@ PSI_BUCKETS = 10
 _BASELINE_HOURS = 7 * 24
 
 
-@ch_retry
 def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=120,
-    )
+    return get_ch_client(send_receive_timeout=120)
 
 
 class DriftMonitor:

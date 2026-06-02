@@ -21,15 +21,13 @@ TB 级数据估算（sql 模式）：
   # TB 级（ClickHouse 压缩后数十GB，原始等效约100GB）
   python batch/historical_loader.py --mode sql --rows 500000000
 """
-import os
 import uuid
 import random
 import argparse
 from datetime import datetime, date, timedelta
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client
 
 log = get_logger('historical_loader')
 
@@ -94,14 +92,8 @@ PRODUCTS_LONG = [f'P{i:04d}' for i in range(201, 1001)]
 CHUNK_SIZE    = 10_000
 
 
-@ch_retry
 def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=15, send_receive_timeout=600,
-    )
+    return get_ch_client(connect_timeout=15, send_receive_timeout=600)
 
 
 # ══════════════════════════════════════════════════════════════

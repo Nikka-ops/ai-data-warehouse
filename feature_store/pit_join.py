@@ -17,26 +17,17 @@ Point-in-Time 正确训练集生成 — PIT Join
   - 欺诈检测：以支付事件为标签，关联当时的风险特征快照
   - 推荐系统：以点击/购买事件为标签，关联商品/用户实时特征
 """
-import os
-import sys
 from datetime import datetime
 from typing import Optional
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client
 
 log = get_logger('pit_join')
 
 
-@ch_retry
 def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=600,
-    )
+    return get_ch_client(send_receive_timeout=600)
 
 
 class PITJoiner:

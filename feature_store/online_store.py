@@ -19,9 +19,8 @@ import json
 from datetime import datetime
 from typing import Optional
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client as _get_ch
 
 log = get_logger('online_store')
 
@@ -44,16 +43,6 @@ def _redis_key(group_name: str, feature_name: str, entity_id: str) -> str:
 def _meta_key(group_name: str, entity_id: str) -> str:
     """构造特征元数据 Redis Key"""
     return f'{_META_PREFIX}:{group_name}:{entity_id}'
-
-
-@ch_retry
-def _get_ch():
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
 
 
 class OnlineFeatureStore:

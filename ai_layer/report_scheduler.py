@@ -14,22 +14,11 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, date
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client as _get_ch
+from config import cfg
 
 log = get_logger('report_scheduler')
-
-
-@ch_retry
-def _get_ch():
-    """获取 ClickHouse 连接，带自动重试"""
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
 
 
 # ── 文件锁工具 ────────────────────────────────────────────────────

@@ -13,9 +13,9 @@ import urllib.request
 import urllib.error
 from datetime import datetime
 
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client as _get_ch
+from config import cfg
 
 log = get_logger('business_monitor')
 
@@ -24,17 +24,6 @@ GMV_DROP_THRESHOLD         = 0.20   # GMV 下跌超过 20% 触发
 CANCEL_RATE_THRESHOLD      = 0.30   # 取消率超过 30% 触发
 CANCEL_RATE_DELTA          = 0.10   # 取消率比昨天同期高 10pp 触发
 CATEGORY_DROP_THRESHOLD    = 0.40   # 任意品类订单量下跌超过 40% 触发
-
-
-@ch_retry
-def _get_ch():
-    """获取 ClickHouse 连接，带自动重试"""
-    import clickhouse_connect
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
 
 
 # ── 数据查询 ────────────────────────────────────────────────────
