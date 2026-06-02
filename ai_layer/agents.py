@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 """Kappa 架构 AI 分析 Multi-Agent（LangGraph Supervisor 模式）"""
-import os
 import sys
 import operator
 import json
@@ -10,7 +9,6 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import create_react_agent
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 from ai_layer.tools import (

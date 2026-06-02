@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
 """基于 NetworkX 的数据血缘图"""
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 
 try:
     import networkx as nx

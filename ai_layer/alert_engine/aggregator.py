@@ -4,11 +4,8 @@
 提供全局单例 get_aggregator()，以及 run_all_detectors() 一键执行所有检测器。
 """
 
-import os
-import sys
 import uuid
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from datetime import datetime, timedelta
 

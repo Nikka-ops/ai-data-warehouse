@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """MockProducer / BaseProducer / BrazilianEcommerceSimulator 单元测试"""
-import sys
-sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 import pytest
 

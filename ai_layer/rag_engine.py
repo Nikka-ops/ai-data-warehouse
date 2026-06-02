@@ -10,7 +10,6 @@ import chromadb
 from chromadb.utils import embedding_functions
 from openai import OpenAI
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 from utils.retry import llm_retry

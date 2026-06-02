@@ -13,8 +13,6 @@ import argparse
 from datetime import datetime, timedelta
 from kafka import KafkaProducer  # type: ignore[attr-defined]
 import os
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 

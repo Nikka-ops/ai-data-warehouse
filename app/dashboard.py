@@ -8,7 +8,6 @@ BI 可视化由 Apache Superset 提供（http://localhost:8088）。
 """
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import streamlit as st
 import pandas as pd

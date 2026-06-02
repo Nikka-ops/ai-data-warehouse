@@ -1,8 +1,5 @@
 import time
-import sys
-import os
 from starlette.middleware.base import BaseHTTPMiddleware
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 from src.common.utils import get_logger
 
 log = get_logger('api.request')

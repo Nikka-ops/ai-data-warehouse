@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """性能基准测试：NL2SQL、RAG、Agent 延迟和准确率"""
-import sys
 import statistics
 import time
-sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 NL2SQL_CASES = [
     "当前最新5分钟的订单量是多少？",

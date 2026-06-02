@@ -2,10 +2,7 @@
 """
 安全闸门：在执行修复操作前进行风险评估和限流检查。
 """
-import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 from utils.logger import get_logger
 from utils.retry import ch_retry

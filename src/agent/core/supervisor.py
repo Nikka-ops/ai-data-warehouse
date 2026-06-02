@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """LangGraph Supervisor 多 Agent 协调器（重组自 ai_layer/agents.py）"""
-import os
-import sys
 import operator
 import json
 from typing import TypedDict, Annotated
@@ -10,7 +8,6 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import create_react_agent
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 
 # 兼容新旧导入路径
 try:

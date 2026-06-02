@@ -5,11 +5,9 @@ Unit tests for ingestion schema modules:
   - src/ingestion/schema/schema_registry.py
 """
 
-import sys
 import json
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 try:
     from src.ingestion.schema.avro_serde import (

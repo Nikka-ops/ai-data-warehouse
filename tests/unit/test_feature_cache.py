@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Redis 特征缓存测试（使用 fakeredis mock）"""
 import pytest
-import sys
-sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 class TestFeatureCache:
     def setup_method(self):

@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """ClickHouse 客户端单元测试（全部使用 mock，不建立真实连接）"""
-import sys
 import pytest
-sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 try:
     from unittest.mock import MagicMock, patch

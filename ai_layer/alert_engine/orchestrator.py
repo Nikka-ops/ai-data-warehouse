@@ -5,12 +5,10 @@ Alert Orchestrator：使用 LangGraph StateGraph 处理告警事件。
          → 执行修复 → 验证（带重试）→ 记录知识 → 通知
 """
 import os
-import sys
 import json
 from datetime import datetime
 from typing import Any, TypedDict
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 from config import cfg
 from utils.logger import get_logger

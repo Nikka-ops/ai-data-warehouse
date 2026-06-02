@@ -11,8 +11,6 @@ pytestmark = pytest.mark.skipif(
 class TestFullPipeline:
     def test_nl2sql_returns_result(self):
         """NL2SQL 完整链路：问题 → SQL → 结果 → 洞察"""
-        import sys
-        sys.path.insert(0, '/home/user/ai-data-warehouse')
         from ai_layer.nl2sql import nl2sql_query
         result = nl2sql_query("当前最新5个分钟的订单量是多少？")
         assert "sql" in result
@@ -20,8 +18,6 @@ class TestFullPipeline:
 
     def test_alert_engine_detects_alerts(self):
         """告警引擎能检测到告警（不要求有真实告警）"""
-        import sys
-        sys.path.insert(0, '/home/user/ai-data-warehouse')
         try:
             import clickhouse_connect
             from src.common.config import cfg

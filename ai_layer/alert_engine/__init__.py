@@ -3,13 +3,10 @@
 告警引擎 —— 公共数据结构与导出
 """
 
-import os
-import sys
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 # ── 核心事件数据结构 ─────────────────────────────────────────────
 

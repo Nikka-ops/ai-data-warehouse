@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from utils.logger import get_logger
 

@@ -2,12 +2,10 @@
 """Agent 工具定义（实时架构，唯一来源）"""
 import os
 import re
-import sys
 from datetime import datetime
 import clickhouse_connect
 from langchain.tools import tool
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 from utils.retry import ch_retry

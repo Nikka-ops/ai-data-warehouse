@@ -4,11 +4,9 @@
 WEBHOOK_URL 从环境变量读取，为空则跳过推送。
 """
 import os
-import sys
 import json
 from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 from utils.logger import get_logger
 

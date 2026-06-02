@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """数据血缘图单元测试"""
 import pytest
-import sys
-sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 class TestLineageGraph:
     def setup_method(self):

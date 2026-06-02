@@ -6,9 +6,6 @@ router = APIRouter(prefix="/query", tags=["查询"])
 @router.post("/nl2sql", response_model=QueryResponse)
 async def natural_language_query(req: QueryRequest):
     """自然语言转 SQL 查询"""
-    import sys
-    import os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
     from ai_layer.nl2sql import nl2sql  # 函数名为 nl2sql，非 nl2sql_query
     result = nl2sql(req.question)
     # nl2sql 返回 data 为 pd.DataFrame，需转换为 list[dict]
@@ -27,9 +24,6 @@ async def natural_language_query(req: QueryRequest):
 @router.post("/sql")
 async def raw_sql_query(sql: str):
     """直接执行 SQL（仅 SELECT）"""
-    import sys
-    import os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
     from ai_layer.nl2sql import validate_sql
     try:
         validate_sql(sql)

@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """Unit tests for src/api/rest/schemas.py and src/monitoring/metrics/business_metrics.py"""
-import sys
-sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 import pytest
 from unittest.mock import MagicMock

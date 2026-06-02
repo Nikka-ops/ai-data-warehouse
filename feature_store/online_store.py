@@ -15,12 +15,10 @@ Redis Key 规范：
   feat_meta:{group_name}:{entity_id}            → Hash（元数据：last_update）
 """
 import os
-import sys
 import json
 from datetime import datetime
 from typing import Optional
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 from utils.retry import ch_retry

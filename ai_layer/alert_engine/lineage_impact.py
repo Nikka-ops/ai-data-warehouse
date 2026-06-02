@@ -3,10 +3,7 @@
 血缘影响评估 —— 为已有告警补充下游血缘信息，并按影响范围升级 severity。
 """
 
-import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from utils.logger import get_logger
 from ai_layer.alert_engine import AlertEvent

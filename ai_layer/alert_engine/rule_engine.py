@@ -4,10 +4,7 @@
 对 ClickHouse 执行预定义规则查询，产出 AlertEvent 列表。
 """
 
-import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from utils.logger import get_logger
 from ai_layer.alert_engine import AlertEvent

@@ -4,11 +4,9 @@
 使用 numpy 线性回归外推预测未来值，不引入 statsmodels 等新依赖。
 """
 
-import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import numpy as np
 

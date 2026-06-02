@@ -11,7 +11,6 @@ import json
 import time
 import re
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import clickhouse_connect
 from openai import OpenAI

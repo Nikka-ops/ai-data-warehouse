@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Alert Engine 单元测试"""
 import pytest
-import sys
-sys.path.insert(0, '/home/user/ai-data-warehouse')
 
 class TestAlertAggregator:
     def test_dedup_same_fingerprint(self):

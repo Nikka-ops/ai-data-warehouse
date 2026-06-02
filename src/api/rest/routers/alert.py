@@ -1,5 +1,3 @@
-import os
-import sys
 import uuid
 from datetime import datetime
 
@@ -9,7 +7,6 @@ from src.api.rest.schemas import AlertRequest, AlertResponse
 
 router = APIRouter(prefix="/alert", tags=["告警"])
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
 
 
 @router.get("/list")

@@ -10,7 +10,6 @@ import re
 import uuid
 from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 from utils.retry import llm_retry, ch_retry

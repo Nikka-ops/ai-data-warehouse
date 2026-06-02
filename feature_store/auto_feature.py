@@ -11,13 +11,11 @@
 这是 AI 数仓区别于传统数仓的核心：系统主动参与特征发现
 """
 import os
-import sys
 import json
 import re
 import yaml
 from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 from utils.retry import ch_retry, llm_retry

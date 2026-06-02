@@ -14,14 +14,12 @@ Kappa 架构：Flink 统一流处理作业
 """
 
 import os
-import sys
 import json
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 

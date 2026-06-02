@@ -9,11 +9,9 @@
   持续刷新：python feature_store/pipeline.py --loop 300
 """
 import os
-import sys
 import time
 import argparse
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 from utils.retry import ch_retry

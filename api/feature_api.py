@@ -16,12 +16,10 @@
   GET  /health                                       健康检查
 """
 import os
-import sys
 import time
 from typing import Optional
 from datetime import datetime
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from config import cfg
 from utils.logger import get_logger
 
