@@ -3,26 +3,17 @@
 import re
 import time
 
-import clickhouse_connect
 import pandas as pd
 from openai import OpenAI
 
 from config import cfg
 from utils.logger import get_logger
 from utils.retry import llm_retry, ch_retry
+from utils.ch_client import get_ch_client
 
 log = get_logger('nl2sql')
 
 llm = OpenAI(api_key=cfg.api_key, base_url=cfg.api_base_url)
-
-
-@ch_retry
-def get_ch_client():
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
 
 
 # ── 实时表描述（全部为流式数据）────────────────────────────────

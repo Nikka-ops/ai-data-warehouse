@@ -55,107 +55,112 @@ class DataProfiler:
     def __init__(self, ch):
         self.ch = ch
 
+    def _check_ods(self, lookback_minutes: int) -> tuple[dict, list[dict]]:
+        """ODS 基础统计 + 问题检测，返回 (ods_stats_dict, issues_list)"""
+        ods_stats = self.ch.query(f"""
+            SELECT
+                count()                                             AS total,
+                countIf(price < 0)                                  AS neg_price,
+                countIf(price > 10000)                              AS extreme_price,
+                countIf(freight_value < 0)                          AS neg_freight,
+                countIf(product_category = '' OR product_category IS NULL) AS null_category,
+                countIf(order_status NOT IN {tuple(self.VALID_ORDER_STATUS)}) AS invalid_status,
+                countIf(NOT match(customer_id, '^C\\\\d{{5}}$'))    AS bad_customer_id,
+                countIf(NOT match(seller_id,   '^S\\\\d{{4}}$'))    AS bad_seller_id,
+                countIf(order_status = 'canceled')                  AS canceled,
+                round(avg(price), 2)                                AS avg_price,
+                round(max(price), 2)                                AS max_price
+            FROM ods.orders_stream
+            WHERE event_time >= now() - INTERVAL {lookback_minutes} MINUTE
+        """).result_rows[0]
+
+        cols = ['total', 'neg_price', 'extreme_price', 'neg_freight',
+                'null_category', 'invalid_status', 'bad_customer_id', 'bad_seller_id',
+                'canceled', 'avg_price', 'max_price']
+        ods = dict(zip(cols, ods_stats))
+        total = ods['total'] or 1
+
+        issues: list[dict] = []
+        if ods['neg_price'] > 0:
+            issues.append({'field': 'price', 'type': 'value_range',
+                'count': ods['neg_price'], 'rate': round(ods['neg_price'] / total, 4),
+                'description': f"存在 {ods['neg_price']} 笔负价格订单（占 {ods['neg_price']/total:.1%}）",
+                'sample_condition': 'price < 0'})
+        if ods['extreme_price'] > 0:
+            issues.append({'field': 'price', 'type': 'value_extreme',
+                'count': ods['extreme_price'], 'rate': round(ods['extreme_price'] / total, 4),
+                'description': f"存在 {ods['extreme_price']} 笔超高价订单（price > R$10000，占 {ods['extreme_price']/total:.1%}）",
+                'sample_condition': 'price > 10000'})
+        if ods['neg_freight'] > 0:
+            issues.append({'field': 'freight_value', 'type': 'value_range',
+                'count': ods['neg_freight'], 'rate': round(ods['neg_freight'] / total, 4),
+                'description': f"存在 {ods['neg_freight']} 笔负运费（占 {ods['neg_freight']/total:.1%}）",
+                'sample_condition': 'freight_value < 0'})
+        if ods['null_category'] > 0:
+            issues.append({'field': 'product_category', 'type': 'null_value',
+                'count': ods['null_category'], 'rate': round(ods['null_category'] / total, 4),
+                'description': f"存在 {ods['null_category']} 条品类为空的记录（占 {ods['null_category']/total:.1%}）",
+                'sample_condition': "product_category = '' OR product_category IS NULL"})
+        if ods['invalid_status'] > 0:
+            issues.append({'field': 'order_status', 'type': 'invalid_enum',
+                'count': ods['invalid_status'], 'rate': round(ods['invalid_status'] / total, 4),
+                'description': f"存在 {ods['invalid_status']} 条非法 order_status（不在枚举值范围内）",
+                'sample_condition': f"order_status NOT IN {tuple(self.VALID_ORDER_STATUS)}"})
+        if ods['bad_customer_id'] > 0:
+            issues.append({'field': 'customer_id', 'type': 'format_error',
+                'count': ods['bad_customer_id'], 'rate': round(ods['bad_customer_id'] / total, 4),
+                'description': f"存在 {ods['bad_customer_id']} 条 customer_id 格式错误（应为 C+5位数字）",
+                'sample_condition': "NOT match(customer_id, '^C\\\\d{5}$')"})
+        return ods, issues
+
+    def _check_dwd_duplicates(self, lookback_minutes: int) -> tuple[int, list[dict]]:
+        """DWD 重复订单检测，返回 (dup_count, issues_list)"""
+        dup_cnt = self.ch.query(f"""
+            SELECT count() AS dup_cnt
+            FROM (
+                SELECT order_id, count() AS cnt
+                FROM dwd.realtime_order_detail
+                WHERE _ingest_time >= now() - INTERVAL {lookback_minutes + 2} MINUTE
+                GROUP BY order_id
+                HAVING cnt > 1
+            )
+        """).result_rows[0][0]
+
+        issues: list[dict] = []
+        if dup_cnt > 0:
+            issues.append({'field': 'order_id', 'type': 'duplicate',
+                'count': dup_cnt, 'rate': 0,
+                'description': f"DWD 层存在 {dup_cnt} 个重复 order_id（JOIN 重复写入）",
+                'sample_condition': None})
+        return dup_cnt, issues
+
+    @staticmethod
+    def _quality_score(issues: list[dict]) -> float:
+        """计算 0-100 数据质量分，每个问题字段扣 15 分，超高问题率最多扣 20 分"""
+        issue_fields = len({i['field'] for i in issues if i.get('rate', 0) > 0})
+        return max(0.0, 100.0 - issue_fields * 15 - sum(
+            min(i.get('rate', 0) * 100, 20) for i in issues
+        ))
+
     def profile(self, lookback_minutes: int = 5) -> dict[str, Any]:
         """
         检测最近 lookback_minutes 分钟内 ODS 和 DWD 数据的质量问题。
         返回结构化质量报告。
         """
         log.info('开始数据质量检测，回溯 %d 分钟', lookback_minutes)
-        issues = []
-        stats = {}
+        issues: list[dict] = []
+        stats: dict = {}
 
         try:
-            # ── 1. ODS 基础统计 ─────────────────────────────────
-            ods_stats = self.ch.query(f"""
-                SELECT
-                    count()                                             AS total,
-                    countIf(price < 0)                                  AS neg_price,
-                    countIf(price > 10000)                              AS extreme_price,
-                    countIf(freight_value < 0)                          AS neg_freight,
-                    countIf(product_category = '' OR product_category IS NULL) AS null_category,
-                    countIf(order_status NOT IN {tuple(self.VALID_ORDER_STATUS)}) AS invalid_status,
-                    countIf(NOT match(customer_id, '^C\\\\d{{5}}$'))    AS bad_customer_id,
-                    countIf(NOT match(seller_id,   '^S\\\\d{{4}}$'))    AS bad_seller_id,
-                    countIf(order_status = 'canceled')                  AS canceled,
-                    round(avg(price), 2)                                AS avg_price,
-                    round(max(price), 2)                                AS max_price
-                FROM ods.orders_stream
-                WHERE event_time >= now() - INTERVAL {lookback_minutes} MINUTE
-            """).result_rows[0]
-
-            cols = ['total', 'neg_price', 'extreme_price', 'neg_freight',
-                    'null_category', 'invalid_status', 'bad_customer_id', 'bad_seller_id',
-                    'canceled', 'avg_price', 'max_price']
-            ods = dict(zip(cols, ods_stats))
+            ods, ods_issues = self._check_ods(lookback_minutes)
+            issues.extend(ods_issues)
             stats['ods'] = ods
             total = ods['total'] or 1
 
-            # ── 2. 判断是否为问题 ────────────────────────────────
-            if ods['neg_price'] > 0:
-                issues.append({
-                    'field': 'price', 'type': 'value_range',
-                    'count': ods['neg_price'], 'rate': round(ods['neg_price'] / total, 4),
-                    'description': f"存在 {ods['neg_price']} 笔负价格订单（占 {ods['neg_price']/total:.1%}）",
-                    'sample_condition': 'price < 0',
-                })
-            if ods['extreme_price'] > 0:
-                issues.append({
-                    'field': 'price', 'type': 'value_extreme',
-                    'count': ods['extreme_price'], 'rate': round(ods['extreme_price'] / total, 4),
-                    'description': f"存在 {ods['extreme_price']} 笔超高价订单（price > R$10000，占 {ods['extreme_price']/total:.1%}）",
-                    'sample_condition': 'price > 10000',
-                })
-            if ods['neg_freight'] > 0:
-                issues.append({
-                    'field': 'freight_value', 'type': 'value_range',
-                    'count': ods['neg_freight'], 'rate': round(ods['neg_freight'] / total, 4),
-                    'description': f"存在 {ods['neg_freight']} 笔负运费（占 {ods['neg_freight']/total:.1%}）",
-                    'sample_condition': 'freight_value < 0',
-                })
-            if ods['null_category'] > 0:
-                issues.append({
-                    'field': 'product_category', 'type': 'null_value',
-                    'count': ods['null_category'], 'rate': round(ods['null_category'] / total, 4),
-                    'description': f"存在 {ods['null_category']} 条品类为空的记录（占 {ods['null_category']/total:.1%}）",
-                    'sample_condition': "product_category = '' OR product_category IS NULL",
-                })
-            if ods['invalid_status'] > 0:
-                issues.append({
-                    'field': 'order_status', 'type': 'invalid_enum',
-                    'count': ods['invalid_status'], 'rate': round(ods['invalid_status'] / total, 4),
-                    'description': f"存在 {ods['invalid_status']} 条非法 order_status（不在枚举值范围内）",
-                    'sample_condition': f"order_status NOT IN {tuple(self.VALID_ORDER_STATUS)}",
-                })
-            if ods['bad_customer_id'] > 0:
-                issues.append({
-                    'field': 'customer_id', 'type': 'format_error',
-                    'count': ods['bad_customer_id'], 'rate': round(ods['bad_customer_id'] / total, 4),
-                    'description': f"存在 {ods['bad_customer_id']} 条 customer_id 格式错误（应为 C+5位数字）",
-                    'sample_condition': "NOT match(customer_id, '^C\\\\d{5}$')",
-                })
-
-            # ── 3. DWD 重复订单检测 ──────────────────────────────
-            dwd_dup = self.ch.query(f"""
-                SELECT count() AS dup_cnt
-                FROM (
-                    SELECT order_id, count() AS cnt
-                    FROM dwd.realtime_order_detail
-                    WHERE _ingest_time >= now() - INTERVAL {lookback_minutes + 2} MINUTE
-                    GROUP BY order_id
-                    HAVING cnt > 1
-                )
-            """).result_rows[0][0]
-
+            dwd_dup, dwd_issues = self._check_dwd_duplicates(lookback_minutes)
+            issues.extend(dwd_issues)
             stats['dwd_duplicates'] = dwd_dup
-            if dwd_dup > 0:
-                issues.append({
-                    'field': 'order_id', 'type': 'duplicate',
-                    'count': dwd_dup, 'rate': 0,
-                    'description': f"DWD 层存在 {dwd_dup} 个重复 order_id（JOIN 重复写入）",
-                    'sample_condition': None,
-                })
 
-            # ── 4. 取消率 ─────────────────────────────────────
             cancel_rate = ods['canceled'] / total
             stats['cancel_rate'] = round(cancel_rate, 4)
             if cancel_rate > 0.15:
@@ -168,14 +173,10 @@ class DataProfiler:
 
         except Exception as e:
             log.error('数据质量检测失败：%s', e)
-            return {'issues': [], 'stats': {}, 'error': str(e), 'scanned_at': datetime.now().isoformat()}
+            return {'issues': [], 'stats': {}, 'error': str(e),
+                    'scanned_at': datetime.now().isoformat()}
 
-        # ── 5. 计算质量评分（100分制）───────────────────────────
-        issue_fields = len({i['field'] for i in issues if i.get('rate', 0) > 0})
-        quality_score = max(0.0, 100.0 - issue_fields * 15 - sum(
-            min(i.get('rate', 0) * 100, 20) for i in issues
-        ))
-
+        quality_score = self._quality_score(issues)
         report = {
             'scanned_at': datetime.now().isoformat(),
             'lookback_minutes': lookback_minutes,
