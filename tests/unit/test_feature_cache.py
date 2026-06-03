@@ -17,7 +17,7 @@ class TestFeatureCache:
             pytest.skip("src.storage.redis 未创建")
 
         cache = FeatureCache()
-        cache._redis = self.fake_redis  # 注入 fake redis
+        cache._client = self.fake_redis  # 注入 fake redis (属性名为 _client)
 
         features = {"order_count": 42, "gmv": 1234.5}
         cache.set("user", "user_001", features)
@@ -32,6 +32,6 @@ class TestFeatureCache:
             pytest.skip("src.storage.redis 未创建")
 
         cache = FeatureCache()
-        cache._redis = self.fake_redis
+        cache._client = self.fake_redis
         result = cache.get("user", "nonexistent_user_99999")
         assert result is None
