@@ -8,7 +8,7 @@ import types
 import pytest
 
 try:
-    from unittest.mock import MagicMock, patch, call
+    from unittest.mock import MagicMock, patch
 except ImportError:
     pytest.skip("unittest.mock 不可用", allow_module_level=True)
 
@@ -252,8 +252,6 @@ class TestFeaturePipeline:
     # 6. run() — compute_group() 按顺序执行每个特征的计算步骤
     def test_compute_group_executes_steps_in_order(self):
         """compute_group() 应按 feature_definitions 的顺序依次计算每个特征"""
-        call_order = []
-
         # CH query 返回两个特征定义
         def query_side_effect(sql, **kwargs):
             result = MagicMock()
@@ -271,7 +269,6 @@ class TestFeaturePipeline:
         self.mock_ch.query.side_effect = query_side_effect
 
         # 拦截 compute_and_store 以记录调用顺序
-        original_compute = self.pipeline_module.compute_and_store
         captured = []
 
         def mock_compute(ch, group_name, feature_name, computation_sql, *args, **kwargs):
