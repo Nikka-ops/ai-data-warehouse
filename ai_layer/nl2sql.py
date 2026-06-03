@@ -10,6 +10,7 @@ from config import cfg
 from utils.logger import get_logger
 from utils.retry import llm_retry, ch_retry
 from utils.ch_client import get_ch_client
+from utils.sql_validator import validate_sql
 
 log = get_logger('nl2sql')
 
@@ -241,15 +242,6 @@ def generate_insight(question: str, sql: str, df: pd.DataFrame,
         max_tokens=400,
     )
     return resp.choices[0].message.content.strip()
-
-
-def validate_sql(sql: str):
-    upper = sql.strip().upper()
-    for kw in ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE']:
-        if re.search(rf'\b{kw}\b', upper):
-            raise ValueError(f'不允许执行 {kw} 操作')
-    if not upper.startswith('SELECT') and not upper.startswith('WITH'):
-        raise ValueError('SQL 必须以 SELECT 或 WITH 开头')
 
 
 def _make_result_summary(df: pd.DataFrame, max_len: int = 120) -> str:

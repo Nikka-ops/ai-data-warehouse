@@ -1,24 +1,14 @@
 # -*- coding: utf-8 -*-
 """Agent 工具定义（实时架构，唯一来源）"""
-import re
 from datetime import datetime
 from langchain.tools import tool
 
 from utils.logger import get_logger
 from utils.ch_client import get_ch_client as _get_ch
+from utils.sql_validator import check_sql as _validate_sql
 from config import cfg
 
 log = get_logger('tools')
-
-
-def _validate_sql(sql: str) -> str | None:
-    upper = sql.strip().upper()
-    for kw in ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE']:
-        if re.search(rf'\b{kw}\b', upper):
-            return f'错误：不允许执行 {kw} 操作'
-    if not (upper.startswith('SELECT') or upper.startswith('WITH')):
-        return '错误：只支持 SELECT 查询'
-    return None
 
 
 @tool

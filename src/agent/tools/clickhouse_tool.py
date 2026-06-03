@@ -1,21 +1,11 @@
 # -*- coding: utf-8 -*-
 """ClickHouse 查询工具（提取自 ai_layer/tools.py）"""
-import re
 from langchain_core.tools import tool
 from src.common.utils import get_logger
 from src.storage.clickhouse.client import get_client as _get_ch
+from utils.sql_validator import check_sql as _validate_sql
 
 log = get_logger('tools.clickhouse')
-
-
-def _validate_sql(sql: str) -> str | None:
-    upper = sql.strip().upper()
-    for kw in ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE']:
-        if re.search(rf'\b{kw}\b', upper):
-            return f'错误：不允许执行 {kw} 操作'
-    if not (upper.startswith('SELECT') or upper.startswith('WITH')):
-        return '错误：只支持 SELECT 查询'
-    return None
 
 
 @tool
