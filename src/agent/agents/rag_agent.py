@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
 """RAG Agent：知识库检索 + 生成回答"""
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 from src.agent.core.base_agent import BaseAgent
 
 class RAGAgent(BaseAgent):

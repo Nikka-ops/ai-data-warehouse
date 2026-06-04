@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """LangGraph Supervisor 多 Agent 协调器（重组自 ai_layer/agents.py）"""
-import os
-import sys
 import operator
 import json
 from typing import TypedDict, Annotated
@@ -10,7 +8,6 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import create_react_agent
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
 
 # 兼容新旧导入路径
 try:
@@ -36,7 +33,7 @@ except ImportError:
     try:
         from src.common.config import cfg
     except ImportError:
-        cfg = None
+        cfg = None  # type: ignore[assignment]
 
 try:
     from utils.logger import get_logger
@@ -109,7 +106,7 @@ def _get_llm():
 # Supervisor 节点
 # ══════════════════════════════════════════════════════════════
 
-def supervisor_node(state: AgentState) -> AgentState:
+def supervisor_node(state: AgentState) -> dict:
     llm = _get_llm()
     context_parts = [f'用户目标：{state["goal"]}']
     if state['agent_outputs']:
@@ -155,7 +152,7 @@ def route_supervisor(state: AgentState) -> str:
 def _make_agent_node(agent_name: str, system_desc: str, tools: list):
     react_agent = create_react_agent(_get_llm(), tools)
 
-    def node(state: AgentState) -> AgentState:
+    def node(state: AgentState) -> dict:
         log.info('%s 执行中...', agent_name)
         goal = state['goal']
         context = ''
@@ -181,7 +178,7 @@ def _make_agent_node(agent_name: str, system_desc: str, tools: list):
 # 合成节点：生成最终报告
 # ══════════════════════════════════════════════════════════════
 
-def synthesize_node(state: AgentState) -> AgentState:
+def synthesize_node(state: AgentState) -> dict:
     llm = _get_llm()
     collected = '\n\n'.join(
         f'【{o["agent"]}】\n{o["output"]}' for o in state['agent_outputs']

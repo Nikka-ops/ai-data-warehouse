@@ -1,45 +1,11 @@
 # -*- coding: utf-8 -*-
 """ClickHouse 查询工具（提取自 ai_layer/tools.py）"""
-import re
-import clickhouse_connect
 from langchain_core.tools import tool
-
-try:
-    from src.common.config import cfg
-except ImportError:
-    import sys
-    import os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
-    from config import cfg
-
-try:
-    from utils.retry import ch_retry
-    from utils.logger import get_logger
-except ImportError:
-    from src.common.utils import get_logger
-    def ch_retry(fn):
-        return fn
+from src.common.utils import get_logger
+from src.storage.clickhouse.client import get_client as _get_ch
+from utils.sql_validator import check_sql as _validate_sql
 
 log = get_logger('tools.clickhouse')
-
-
-@ch_retry
-def _get_ch():
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
-
-
-def _validate_sql(sql: str) -> str | None:
-    upper = sql.strip().upper()
-    for kw in ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE']:
-        if re.search(rf'\b{kw}\b', upper):
-            return f'错误：不允许执行 {kw} 操作'
-    if not (upper.startswith('SELECT') or upper.startswith('WITH')):
-        return '错误：只支持 SELECT 查询'
-    return None
 
 
 @tool

@@ -1,35 +1,14 @@
 # -*- coding: utf-8 -*-
 """Agent 工具定义（实时架构，唯一来源）"""
-import os, re, sys
 from datetime import datetime
-import clickhouse_connect
 from langchain.tools import tool
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from config import cfg
 from utils.logger import get_logger
-from utils.retry import ch_retry
+from utils.ch_client import get_ch_client as _get_ch
+from utils.sql_validator import check_sql as _validate_sql
+from config import cfg
 
 log = get_logger('tools')
-
-
-@ch_retry
-def _get_ch():
-    return clickhouse_connect.get_client(
-        host=cfg.ch_host, port=cfg.ch_port,
-        username=cfg.ch_user, password=cfg.ch_password,
-        connect_timeout=10, send_receive_timeout=60,
-    )
-
-
-def _validate_sql(sql: str) -> str | None:
-    upper = sql.strip().upper()
-    for kw in ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE']:
-        if re.search(rf'\b{kw}\b', upper):
-            return f'错误：不允许执行 {kw} 操作'
-    if not (upper.startswith('SELECT') or upper.startswith('WITH')):
-        return '错误：只支持 SELECT 查询'
-    return None
 
 
 @tool
@@ -318,7 +297,6 @@ def trigger_kappa_replay(job_name: str = '') -> str:
     注意：实际回放由 flink-replay 服务执行，此工具写入任务触发记录。
     """
     import uuid
-    from datetime import datetime
     try:
         ch = _get_ch()
         job_id   = str(uuid.uuid4())
