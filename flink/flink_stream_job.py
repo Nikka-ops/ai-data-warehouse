@@ -13,7 +13,6 @@ Kappa 架构：Flink 统一流处理作业
                                     ► dws.kappa_hourly_agg（回放模式小时聚合）
 """
 
-import os
 import json
 import time
 import uuid
