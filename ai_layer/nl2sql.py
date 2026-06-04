@@ -7,7 +7,7 @@ import pandas as pd
 from openai import OpenAI
 
 from config import cfg
-from utils.logger import get_logger
+from src.common.utils import get_logger
 from utils.retry import llm_retry, ch_retry
 from utils.ch_client import get_ch_client
 from utils.sql_validator import validate_sql

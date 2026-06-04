@@ -10,7 +10,7 @@ from chromadb.utils import embedding_functions
 from openai import OpenAI
 
 from config import cfg
-from utils.logger import get_logger
+from src.common.utils import get_logger
 from utils.retry import llm_retry
 
 log = get_logger('rag_engine')

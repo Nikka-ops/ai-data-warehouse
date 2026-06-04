@@ -20,7 +20,7 @@ class TestFullPipeline:
         """告警引擎能检测到告警（不要求有真实告警）"""
         try:
             import clickhouse_connect
-            from src.common.config import cfg
+            from config import cfg
             ch = clickhouse_connect.get_client(
                 host=cfg.ch_host, port=cfg.ch_port,
                 username=cfg.ch_user, password=cfg.ch_password)

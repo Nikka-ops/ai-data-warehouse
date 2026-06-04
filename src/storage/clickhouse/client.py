@@ -15,7 +15,7 @@ except ImportError:
     clickhouse_connect = None  # type: ignore[assignment]
     _CH_AVAILABLE = False      # 依赖缺失时不崩溃
 
-from src.common.config import cfg
+from config import cfg
 from src.common.utils import get_logger
 
 _PANDAS_AVAILABLE = importlib.util.find_spec("pandas") is not None

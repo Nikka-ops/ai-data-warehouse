@@ -3,7 +3,7 @@
 from datetime import datetime
 from langchain.tools import tool
 
-from utils.logger import get_logger
+from src.common.utils import get_logger
 from utils.ch_client import get_ch_client as _get_ch
 from utils.sql_validator import check_sql as _validate_sql
 from config import cfg

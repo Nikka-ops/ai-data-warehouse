@@ -13,7 +13,7 @@ import argparse
 from datetime import datetime, timedelta
 from kafka import KafkaProducer  # type: ignore[attr-defined]
 from config import cfg
-from utils.logger import get_logger
+from src.common.utils import get_logger
 
 log = get_logger('producer')
 

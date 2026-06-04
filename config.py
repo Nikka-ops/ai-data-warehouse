@@ -6,8 +6,7 @@
 未安装时自动降级为标准库 dataclass，行为一致。
 
 使用方式：
-    from config import cfg              # 根模块
-    from src.common.config import cfg   # src 树（透明再导出本模块）
+    from config import cfg
 """
 import os
 

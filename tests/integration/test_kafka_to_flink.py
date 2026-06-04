@@ -14,7 +14,7 @@ class TestKafkaFlinkPipeline:
         """测试生产者能成功发送消息"""
         try:
             from kafka import KafkaProducer
-            from src.common.config import cfg
+            from config import cfg
             producer = KafkaProducer(bootstrap_servers=cfg.kafka_bootstrap)
             future = producer.send("orders_stream", b'{"test": true}')
             record = future.get(timeout=10)
@@ -27,7 +27,7 @@ class TestKafkaFlinkPipeline:
         """测试 ClickHouse 连接和写入"""
         try:
             import clickhouse_connect
-            from src.common.config import cfg
+            from config import cfg
             ch = clickhouse_connect.get_client(
                 host=cfg.ch_host, port=cfg.ch_port,
                 username=cfg.ch_user, password=cfg.ch_password)

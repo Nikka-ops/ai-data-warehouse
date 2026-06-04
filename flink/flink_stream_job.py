@@ -20,7 +20,7 @@ from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 from config import cfg
-from utils.logger import get_logger
+from src.common.utils import get_logger
 
 log = get_logger('flink_job')
 

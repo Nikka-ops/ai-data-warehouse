@@ -31,12 +31,12 @@ try:
     from config import cfg
 except ImportError:
     try:
-        from src.common.config import cfg
+        from config import cfg
     except ImportError:
         cfg = None  # type: ignore[assignment]
 
 try:
-    from utils.logger import get_logger
+    from src.common.utils import get_logger
 except ImportError:
     from src.common.utils import get_logger
 

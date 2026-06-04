@@ -8,5 +8,5 @@ def get_ch_client():
 @lru_cache(maxsize=1)
 def get_redis_client():
     import redis
-    from src.common.config import cfg
+    from config import cfg
     return redis.Redis(host=cfg.redis_host, port=cfg.redis_port, decode_responses=True)

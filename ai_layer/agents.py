@@ -10,7 +10,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import create_react_agent
 
 from config import cfg
-from utils.logger import get_logger
+from src.common.utils import get_logger
 from ai_layer.tools import (
     query_data, query_knowledge, detect_realtime_anomaly,
     generate_insight, get_etl_status, get_forecast,

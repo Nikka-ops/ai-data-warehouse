@@ -14,7 +14,7 @@ except ImportError:
     _KafkaProducer = None  # type: ignore[assignment]
     _KAFKA_AVAILABLE = False  # 缺少依赖时不崩溃
 
-from src.common.config import cfg
+from config import cfg
 from src.common.utils import get_logger
 from src.ingestion.producers.base_producer import BaseProducer
 
