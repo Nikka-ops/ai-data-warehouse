@@ -1,115 +1,119 @@
 # 指标口径手册
 
+金额单位统一为人民币（￥）。
+
+---
+
 ## 核心交易指标
 
-### GMV（Gross Merchandise Volume，商品成交总额）
+### GMV（商品成交总额）
 
-**定义：** 所有订单的商品价格之和，不含运费，不扣除退款。
-**计算公式：** GMV = SUM(price)，其中 price 来自 dwd.order_detail 或 dws 层的 gmv 字段。
-**注意事项：**
-- GMV 包含已取消订单，反映平台总交易规模
-- GMV 不等于实际收入，实际收入需扣除退款、佣金等
-- 运费（freight_value）不计入 GMV
-- 本数仓 GMV 单位为巴西雷亚尔（R$）
+**定义：** 订单明细分摊后的成交额之和，不含运费，不扣除退款。
 
-**示例 SQL：**
+**在哪查：** `dws.trade_window_agg.order_amount`。注意字段名是 `order_amount`，
+不叫 `gmv` —— 这是最常写错的一个名字。
+
+**两种口径不要混：**
+
 ```sql
-SELECT sum(price) AS gmv FROM dwd.order_detail
+-- 今日累计 GMV：走 CUMULATE_1D 的最新一行，一次点查
+SELECT order_amount FROM dws.trade_window_agg
+WHERE stat_date = CURDATE() AND window_type = 'CUMULATE_1D'
+  AND category1_name = 'ALL' AND region_name = 'ALL'
+ORDER BY window_start DESC LIMIT 1;
+
+-- 某个时间段的 GMV：走 TUMBLE_1M 分钟窗口再 SUM
+SELECT SUM(order_amount) FROM dws.trade_window_agg
+WHERE window_type = 'TUMBLE_1M'
+  AND category1_name = 'ALL' AND region_name = 'ALL'
+  AND window_start >= DATE_SUB(NOW(), INTERVAL 30 MINUTE);
 ```
 
----
-
-### 销售额 vs GMV 的区别
-
-- **GMV**：包含所有状态的订单（含取消、退款），反映平台交易规模
-- **实际销售额**：只计算 delivered（已送达）订单，反映真实成交
-- 在本数仓中，dws/ads 层的 gmv 字段 = 所有状态订单的 price 之和（即 GMV 口径）
-- 若需要"实际销售额"，需过滤 order_status = 'delivered'
+**不要把 CUMULATE_1D 的多行 SUM 起来** —— 累计窗口每分钟输出一行「截至此刻的累计值」，
+相加会得到一个毫无意义的数。
 
 ---
 
-### 客单价（Average Order Value，AOV）
+### 实付金额 vs GMV
 
-**定义：** 平均每笔订单的商品金额。
-**计算公式：** 客单价 = GMV / 订单数 = SUM(price) / COUNT(DISTINCT order_id)
-**在数仓中：** dws.order_daily 和 ads.monthly_kpi 中的 avg_order_value 字段已预计算。
-**本数据集客单价：** 约 R$ 132.71（约合人民币 180 元）
+- **GMV**：所有已下单商品的成交额，包含未支付和已取消的订单，反映交易规模
+- **实付金额**：`dws.pay_window_agg.pay_amount`，只统计支付成功的回调，反映真实收款
 
----
-
-### 订单数 vs 商品件数
-
-- **订单数（order_cnt）：** 按 order_id 去重计数，一个订单可包含多件商品
-- **商品件数（item_cnt）：** 订单商品明细行数，不去重
-- 两者关系：item_cnt >= order_cnt，差值为多件商品订单的额外件数
-- 本数据集：订单数 98,666，商品件数 112,650，平均每单 1.14 件
+两者不会相等，差额主要是未支付和已取消的部分。
 
 ---
 
-### 用户数 vs 客户数
+### 客单价 / 件均价
 
-- **customer_id：** 每笔订单生成一个，同一用户多次购买有多个 customer_id
-- **customer_unique_id：** 真实用户唯一标识，计算 UV（独立用户数）时必须用此字段
-- **用户数（user_cnt）：** COUNT(DISTINCT customer_unique_id)
-- 本数据集：订单数 98,666，独立用户数 97,729，说明绝大多数用户只买过一次（复购率极低）
+- **客单价** = `order_amount / order_cnt`，一个订单平均多少钱
+- **件均价** = `order_amount / sku_num`，一件商品平均多少钱
 
----
-
-### 环比增长率（Month-over-Month，MoM）
-
-**定义：** 本月指标相比上月的增长幅度。
-**计算公式：** MoM = (本月值 - 上月值) / 上月值 × 100%
-**在数仓中：** ads.monthly_kpi 表中的 mom_gmv_rate 字段，单位为百分比（%）
-**示例：** mom_gmv_rate = 27.71 表示本月GMV比上月增长了 27.71%
+两者不是一回事：一单买三件时，客单价是件均价的三倍。
+质检器检测的「均价异常」用的是件均价 —— 它对商品配错价格更敏感。
 
 ---
 
-### 同比增长率（Year-over-Year，YoY）
+### 支付转化率
 
-**定义：** 本月指标相比去年同月的增长幅度。
-**注意：** 本数仓 ADS 层未预计算同比，需要在查询时自行计算：
+**定义：** 状态已经推进到支付及之后的订单 / 总订单数。
+
 ```sql
--- 计算同比示例
-SELECT
-    a.ym,
-    a.gmv AS 本月GMV,
-    b.gmv AS 去年同月GMV,
-    round((a.gmv - b.gmv) / b.gmv * 100, 2) AS yoy_rate
-FROM ads.monthly_kpi a
-LEFT JOIN ads.monthly_kpi b
-    ON substring(a.ym, 6, 2) = substring(b.ym, 6, 2)  -- 月份相同
-    AND toInt32(substring(a.ym, 1, 4)) = toInt32(substring(b.ym, 1, 4)) + 1  -- 年份差1
+SELECT pay_conversion_pct FROM ads.v_today_conversion;
 ```
 
----
-
-### 配送时效（Delivery Days）
-
-**定义：** 从客户下单到实际收货的自然日数。
-**计算公式：** delivery_days = dateDiff('day', order_purchase_ts, order_delivered_ts)
-**在数仓中：** dwd.order_detail 表的 delivery_days 字段（仅 delivered 状态订单有值）
-**本数据集平均配送时效：** 约 12 天（巴西地域广阔，配送时间较长）
+**只能从 `dwd.order_snapshot` 算。** 这个指标问的是「有多少订单当前处于已支付状态」，
+是状态分布，不是事件计数。窗口聚合表装的是「发生了多少次支付」，
+回答不了「现在有多少订单是已支付的」。
 
 ---
 
-## 运营分析指标
+## 用户指标
 
-### 取消率（Cancellation Rate）
+### 独立用户数（UV）
 
-**计算公式：** 取消率 = 取消订单数 / 总订单数 × 100%
-**本数据集取消率：** 542 / 98,666 ≈ 0.55%，取消率极低
+**必须走 BITMAP。** 这是本数仓最容易算错的指标。
+
+```sql
+-- 正确：跨天精确去重
+SELECT BITMAP_UNION_COUNT(uv_bitmap) FROM dws.user_active_daily
+WHERE region_name = 'ALL' AND dt >= CURDATE() - INTERVAL 6 DAY;
+```
+
+**三种典型错误写法：**
+
+| 错误写法 | 为什么错 |
+|---------|---------|
+| `SUM(order_user_cnt)` | 那是**单个分钟窗口内**的去重用户数。同一个用户在 10:01 和 10:05 各下一单，两个窗口各记一次，相加得 2 |
+| `COUNT(uv_bitmap)` / `SUM(uv_bitmap)` | BITMAP 是位图类型，不是数字，这两种写法要么报错要么返回无意义的值 |
+| 把每天的 UV 数字加起来 | 跨天重复活跃的用户被重复计数 |
+
+**为什么用 BITMAP 而不是 `COUNT(DISTINCT user_id)`：**
+后者每查一次就要扫一次全量明细，问「最近 30 天有多少独立用户」就得扫 30 个分区的
+全部订单。BITMAP 把「当天有哪些用户」这个集合本身存下来，跨天查询变成压缩位图上的
+或运算，不回明细，且结果是精确值（不是 HLL 那种估算）。
 
 ---
 
-### 送达率（Delivery Rate）
+## 链路时效指标
 
-**计算公式：** 送达率 = 已送达订单数 / 总订单数 × 100%
-**本数据集送达率：** 97.8%，物流体系成熟
+### 端到端延迟（lag_seconds）
 
----
+**定义：** 事件在业务库发生（`create_time` / `callback_time`）→ Flink 加工完成，
+中间经过的秒数。在 DWD 层按单条记录计算，DWS 层取 `MAX` 和 `AVG`。
 
-### 复购率（Repurchase Rate）
+**为什么两个都要看：** 只看 AVG 会把偶发的严重延迟平均掉；只看 MAX 又容易被单点噪声带偏。
+两个一起看才判断得出来是链路整体慢了，还是个别数据卡住了。
 
-**定义：** 购买过2次及以上的用户占总用户数的比例。
-**本数据集：** 订单数(98,666) ≈ 用户数(97,729)，说明复购率接近0，几乎每个用户只买过一次。
-**分析：** 这是新兴电商平台的典型特征，用户获取快但留存差，需要重点投入复购运营。
+正常水位在个位数秒。超过 120 秒质检器会报 `LATENCY` 告警，
+排查方向是 Flink 背压、Kafka 消费积压、Doris 导入变慢。
+
+### 迟到率
+
+**定义：** 落到 `stream.late_records` 的记录数 / 同期订单数。
+
+watermark 给了 5 分钟乱序容忍，这个范围内的乱序数据能正常进窗口参与聚合。
+超出 5 分钟的进不了原窗口 —— 窗口 TVF 会直接丢弃且不留痕迹，
+所以 DWS 作业用 `CURRENT_WATERMARK()` 把这批记录分流到兜底表。
+
+迟到率抬头说明窗口结果的完整性在下降，通常是上游延迟或 watermark 容忍度设得不合适。
+这些数据没有丢，带着 Kafka 位点，可以精确回放补算。

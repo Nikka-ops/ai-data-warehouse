@@ -1,0 +1,2 @@
+# connector jar 由 flink/download_jars.ps1 从 Maven 中央仓库下载，不进版本库
+*.jar

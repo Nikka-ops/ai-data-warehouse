@@ -5,11 +5,12 @@
 彻底解决 ReAct 格式解析问题
 """
 
-import os
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import re
 import json
 from datetime import datetime
-import clickhouse_connect
+from common.doris_client import get_client
 import pandas as pd
 from openai import OpenAI
 from langchain_openai import ChatOpenAI
@@ -17,14 +18,14 @@ from langchain.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate
 
-CH_HOST     = os.getenv('CLICKHOUSE_HOST', 'localhost')
-CH_PORT     = int(os.getenv('CLICKHOUSE_PORT', '8123'))
-CH_USER     = os.getenv('CLICKHOUSE_USER', 'admin')
-CH_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', 'admin123')
+CH_HOST     = os.getenv('DORIS_HOST', 'localhost')
+CH_PORT     = int(os.getenv('DORIS_QUERY_PORT', '9030'))
+CH_USER     = os.getenv('DORIS_USER', 'root')
+CH_PASSWORD = os.getenv('DORIS_PASSWORD', '')
 
 
 def get_ch():
-    return clickhouse_connect.get_client(
+    return get_client(
         host=CH_HOST, port=CH_PORT,
         username=CH_USER, password=CH_PASSWORD
     )
@@ -52,15 +53,24 @@ def get_openai():
 @tool
 def query_data(sql: str) -> str:
     """
-    在 ClickHouse 数仓执行 SQL 查询，返回结果表格。
+    在 Doris 数仓执行 SQL 查询，返回结果表格。
     只支持 SELECT 查询。
     可用表：
-    - ads.monthly_kpi：ym年月、gmv、order_cnt、user_cnt、avg_order_value、mom_gmv_rate环比
-    - dws.order_daily：dt日期、gmv、order_cnt、user_cnt、avg_order_value
-    - dws.category_daily：dt、product_category品类、gmv、order_cnt
-    - ads.state_sales_rank：dt_month、state州名、gmv、order_cnt、rank_by_gmv排名
-    - dwd.order_detail：order_date、state、product_category、price商品价格、freight_value运费、order_status、delivery_days配送天数
-    注意：dwd.order_detail 没有 gmv 字段，用 price 代替。
+    - dws.trade_window_agg：交易域窗口聚合。stat_date、window_type(TUMBLE_1M/CUMULATE_1D)、
+      window_start、category1_name、region_name（两列取 ALL 表示汇总粒度）、
+      order_cnt、order_user_cnt、sku_num、order_amount(即GMV)、max_lag_seconds
+    - dws.pay_window_agg：支付域窗口聚合。payment_type(ALL表示汇总)、pay_cnt、pay_user_cnt、pay_amount
+    - dws.user_active_daily：用户日活。dt、region_name、uv_bitmap/pay_uv_bitmap(BITMAP类型)
+    - dwd.order_snapshot：订单累积快照。create_date、order_id、order_status
+      (CREATED/PAID/SHIPPED/DELIVERED/CANCELED/REFUNDED)、total_amount、region_name、pay_lag_seconds
+    - ads.category_rank：当日品类排行。stat_date、category1_name、gmv、rank_by_gmv、gmv_share_pct
+    - ads.region_rank：当日大区排行。stat_date、region_name、gmv、uv、rank_by_gmv
+    注意三条口径规则：
+    1) trade_window_agg 必须过滤 window_type，且 category1_name 与 region_name
+       两列必须同时约束，否则汇总行与明细行叠加，指标翻倍且不报错。
+    2) uv_bitmap 是 BITMAP 类型，取基数用 BITMAP_UNION_COUNT()，不能直接 SELECT/COUNT/SUM。
+    3) order_user_cnt 只在单个窗口内有效，跨窗口相加会重复计数；
+       跨窗口/跨天的独立用户数一律查 dws.user_active_daily。
     """
     try:
         sql_upper = sql.strip().upper()
@@ -111,10 +121,10 @@ def calculate_anomalies(table: str, date_col: str, value_col: str, where_clause:
     """
     对指定表的数值列进行异常检测，找出超过均值±2个标准差的异常点。
     参数：
-    - table: 表名，如 dws.order_daily
-    - date_col: 日期列名，如 dt
-    - value_col: 数值列名，如 gmv
-    - where_clause: 可选的 WHERE 条件，如 "dt >= '2017-01-01'"
+    - table: 表名，如 dws.trade_window_agg
+    - date_col: 日期列名，如 window_start
+    - value_col: 数值列名，如 order_amount
+    - where_clause: 可选的 WHERE 条件，如 "window_type='TUMBLE_1M' AND category1_name='ALL' AND region_name='ALL'"
     """
     try:
         where = f"WHERE {where_clause}" if where_clause else ""
@@ -215,13 +225,18 @@ def make_executor(tools: list, system_msg: str, max_iter: int = 10) -> AgentExec
 ANOMALY_SYSTEM = """你是一位专业的数据分析师，擅长销售异常检测。
 
 请按以下步骤完成分析：
-1. 用 calculate_anomalies 检测 dws.order_daily 表 gmv 字段的异常，where条件用 dt >= '2017-01-01'
-2. 用 query_data 查询异常峰值日期（2017-11-24）前后14天的每日数据
-3. 用 query_knowledge 查询"巴西电商节日规律"
-4. 用 generate_insight 生成异常原因分析，输入前3步的完整结果
-5. 用 save_report 保存完整报告，标题"销售异常分析报告"，内容包含异常数据、对比数据、节日背景和洞察
+1. 用 calculate_anomalies 检测 dws.trade_window_agg 表 order_amount 字段的异常，
+   date_col 用 window_start，where 条件必须写全三个过滤：
+   "window_type='TUMBLE_1M' AND category1_name='ALL' AND region_name='ALL' AND stat_date=CURDATE()"
+   （少写任一个维度过滤，汇总行会和明细行叠加，检测出来的"异常"是假的）
+2. 用 query_data 查询异常窗口前后各 30 分钟的分钟级数据做对比
+3. 用 query_data 查询同一时段的支付情况和链路延迟，判断是真实业务波动
+   还是链路问题（延迟飙高、迟到数据变多，往往说明是链路侧的原因）
+4. 用 query_knowledge 查询相关的指标口径与业务规则
+5. 用 generate_insight 生成异常原因分析，输入前几步的完整结果
+6. 用 save_report 保存完整报告，标题"实时链路异常分析报告"
 
-完成所有步骤后给出最终结论。"""
+完成所有步骤后给出最终结论，并明确指出是业务波动还是链路故障。"""
 
 def run_anomaly_agent(callback=None):
     tools = [query_data, calculate_anomalies, query_knowledge, generate_insight, save_report]
@@ -237,14 +252,23 @@ def run_anomaly_agent(callback=None):
 WEEKLY_SYSTEM = """你是一位数据分析师，负责生成每周数据报告。
 
 请按以下步骤生成完整周报：
-1. 用 query_data 查询月度KPI：
-   SELECT ym, round(gmv,0) AS GMV, order_cnt AS 订单数, user_cnt AS 用户数, round(mom_gmv_rate,2) AS 环比增长率 FROM ads.monthly_kpi ORDER BY ym DESC LIMIT 6
-2. 用 query_data 查询品类Top10：
-   SELECT product_category AS 品类, round(sum(gmv),0) AS 总GMV, sum(order_cnt) AS 订单数 FROM dws.category_daily GROUP BY product_category ORDER BY 总GMV DESC LIMIT 10
-3. 用 query_data 查询最新月省份排行：
-   SELECT state AS 州, round(gmv,0) AS GMV, order_cnt AS 订单数, rank_by_gmv AS 排名 FROM ads.state_sales_rank WHERE dt_month=(SELECT max(dt_month) FROM ads.state_sales_rank) ORDER BY rank_by_gmv LIMIT 10
-4. 用 generate_insight 分别对GMV趋势、品类数据生成洞察
-5. 用 save_report 将以上全部内容整合为Markdown周报保存，标题"数据分析周报"
+1. 用 query_data 查询近 7 天日趋势（BITMAP 取 UV，不要用窗口表的 order_user_cnt 相加）：
+   SELECT dt, order_cnt AS 订单数, ROUND(order_amount,0) AS GMV,
+          BITMAP_UNION_COUNT(uv_bitmap) AS 独立用户数
+   FROM dws.user_active_daily WHERE region_name='ALL' AND dt >= CURDATE() - INTERVAL 6 DAY
+   GROUP BY dt, order_cnt, order_amount ORDER BY dt
+2. 用 query_data 查询今日品类 Top10：
+   SELECT category1_name AS 品类, ROUND(gmv,0) AS GMV, order_cnt AS 订单数,
+          gmv_share_pct AS 占比 FROM ads.category_rank
+   WHERE stat_date=CURDATE() ORDER BY rank_by_gmv LIMIT 10
+3. 用 query_data 查询今日大区排行：
+   SELECT region_name AS 大区, ROUND(gmv,0) AS GMV, order_cnt AS 订单数,
+          uv AS 独立用户数 FROM ads.region_rank
+   WHERE stat_date=CURDATE() ORDER BY rank_by_gmv LIMIT 10
+4. 用 query_data 查询今日支付转化：
+   SELECT * FROM ads.v_today_conversion
+5. 用 generate_insight 分别对 GMV 趋势、品类结构、转化情况生成洞察
+6. 用 save_report 将以上全部内容整合为 Markdown 周报保存，标题"数据分析周报"
 
 最终输出周报摘要。"""
 
@@ -266,11 +290,14 @@ FREE_SYSTEM = """你是一位专业的数据分析师，拥有以下工具：
 - save_report：保存分析报告
 
 可用数据表：
-- ads.monthly_kpi：ym、gmv、order_cnt、user_cnt、mom_gmv_rate
-- dws.category_daily：dt、product_category、gmv、order_cnt
-- dws.order_daily：dt、gmv、order_cnt、user_cnt、avg_order_value
-- ads.state_sales_rank：dt_month、state、gmv、order_cnt、rank_by_gmv
-- dwd.order_detail：order_date、state、product_category、price、order_status、delivery_days
+- dws.trade_window_agg：window_type、window_start、category1_name、region_name、order_cnt、order_amount(GMV)
+- dws.pay_window_agg：window_type、window_start、payment_type、pay_cnt、pay_amount
+- dws.user_active_daily：dt、region_name、uv_bitmap（BITMAP，用 BITMAP_UNION_COUNT 取基数）
+- dwd.order_snapshot：create_date、order_id、order_status、total_amount、region_name、pay_lag_seconds
+- ads.category_rank / ads.region_rank：当日品类与大区排行，含 gmv、rank_by_gmv
+
+口径提醒：窗口表必须过滤 window_type，且维度列取 'ALL' 是汇总行，
+只约束一个维度会让另一个维度的汇总行与明细行叠加。
 
 工作原则：
 - 先理解分析目标，再决定查哪些数据

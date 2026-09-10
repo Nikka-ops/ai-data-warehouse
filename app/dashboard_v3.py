@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.express as px
 import re, json, time
 from openai import OpenAI
-import clickhouse_connect
+from common.doris_client import get_client
 
 st.set_page_config(page_title="AI 数仓助手 v3", page_icon="🤖", layout="wide")
 
@@ -39,12 +39,14 @@ with st.sidebar:
     st.markdown("---")
     # 系统状态
     try:
-        ch = clickhouse_connect.get_client(host='localhost', port=8123, username='admin', password='admin123')
-        cnt = ch.query("SELECT count() FROM dwd.order_detail").first_row[0]
-        st.success(f"ClickHouse 已连接")
-        st.metric("订单数据量", f"{cnt:,} 行")
+        ch = get_client()
+        cnt = ch.query(
+            "SELECT COUNT(*) FROM dwd.order_snapshot WHERE create_date >= CURDATE() - INTERVAL 7 DAY"
+        ).first_row[0]
+        st.success(f"Doris 已连接")
+        st.metric("近 7 天订单", f"{cnt:,} 行")
     except:
-        st.error("ClickHouse 未连接")
+        st.error("Doris 未连接")
 
     try:
         import chromadb
@@ -62,17 +64,22 @@ with st.sidebar:
 
 # ── KPI 卡片（全局显示）─────────────────────────────────────
 st.title("🤖 AI 数仓助手 v3")
-st.caption("NL2SQL · RAG · Agent 三位一体 · Powered by DeepSeek + ClickHouse")
+st.caption("NL2SQL · RAG · Agent 三位一体 · Powered by DeepSeek + Doris")
 
 try:
-    ch = clickhouse_connect.get_client(host='localhost', port=8123, username='admin', password='admin123')
-    kpi = ch.query("SELECT round(sum(gmv),0),sum(order_cnt),sum(user_cnt),round(avg(avg_order_value),2) FROM ads.monthly_kpi").first_row
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("总 GMV", f"R$ {kpi[0]:,.0f}")
-    c2.metric("总订单数", f"{kpi[1]:,}")
-    c3.metric("总用户数", f"{kpi[2]:,}")
-    c4.metric("平均客单价", f"R$ {kpi[3]:.2f}")
-except:
+    ch = get_client()
+    # 今日累计走 CUMULATE_1D 窗口的最新一行；
+    # UV 走 BITMAP，不能拿窗口表的 order_user_cnt 相加
+    kpi = ch.query("""
+        SELECT today_order_cnt, today_gmv, today_order_user_cnt, avg_order_value
+        FROM ads.v_today_trade_kpi
+    """).first_row
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("今日订单数", f"{int(kpi[0] or 0):,}")
+    c2.metric("今日 GMV", f"￥{float(kpi[1] or 0):,.0f}")
+    c3.metric("今日下单用户", f"{int(kpi[2] or 0):,}")
+    c4.metric("客单价", f"￥{float(kpi[3] or 0):,.2f}")
+except Exception:
     pass
 
 st.markdown("---")
@@ -125,38 +132,31 @@ if page == "💬 智能问答":
         if actual_mode == "数据查询":
             with st.spinner("生成 SQL 并查询..."):
                 try:
-                    ch = clickhouse_connect.get_client(host='localhost',port=8123,username='admin',password='admin123')
-                    tables = {
-                        'dws.order_daily':'每日汇总，dt、gmv、order_cnt、user_cnt、avg_order_value',
-                        'dws.category_daily':'品类每日，dt、product_category、gmv、order_cnt',
-                        'ads.monthly_kpi':'月度KPI，ym、gmv、order_cnt、user_cnt、mom_gmv_rate',
-                        'ads.state_sales_rank':'省份排行，dt_month、state、gmv、order_cnt、rank_by_gmv（无user_cnt）',
-                        'dwd.order_detail':'明细宽表，order_date、state、product_category、price、freight_value、order_status、delivery_days（无gmv字段）',
-                    }
-                    parts=[]
-                    for t,desc in tables.items():
-                        db,tbl=t.split('.')
-                        cols=ch.query(f"SELECT name,type FROM system.columns WHERE database='{db}' AND table='{tbl}' ORDER BY position").result_rows
-                        col_lines=[f"  {c[0]} {c[1]}" for c in cols if not c[0].startswith('_')]
-                        parts.append(f"-- {desc}\n{t}:\n"+"\n".join(col_lines))
-                    schema="\n\n".join(parts)
+                    ch = get_client()
 
-                    resp=llm.chat.completions.create(
-                        model='deepseek-chat',
-                        messages=[
-                            {'role':'system','content':f"转为ClickHouse SQL，只返回SELECT不加分号。dwd层用price不用gmv。\n{schema}"},
-                            {'role':'user','content':question}
-                        ],
-                        temperature=0.1,max_tokens=600
-                    )
-                    sql=resp.choices[0].message.content.strip()
-                    sql=re.sub(r'^```sql\s*','',sql,flags=re.IGNORECASE)
-                    sql=re.sub(r'^```\s*','',sql)
-                    sql=re.sub(r'\s*```$','',sql)
-                    sql=sql.strip().rstrip(';')
+                    # 直接复用 ai_layer.nl2sql —— 这里原来内联了一份简化版的
+                    # schema 拼装和提示词，和 nl2sql.py 里那份会各自漂移，
+                    # 于是「评估脚本测的」和「界面上真正跑的」不是同一段逻辑。
+                    # 口径陷阱（GROUPING SETS 的 ALL 行、BITMAP 去重）也只写在
+                    # nl2sql.py 那份里，界面这份根本没有，生成的 SQL 结果偏大。
+                    from ai_layer.nl2sql import get_schema, generate_sql
+                    from ai_layer import sql_guard
+
+                    schema = get_schema(ch)
+                    sql = generate_sql(question, schema)
 
                     with st.expander("生成的 SQL",expanded=True):
                         st.code(sql,language='sql')
+
+                    # 口径体检。SQL 能跑通不代表口径对 ——
+                    # 漏了 GROUPING SETS 的 ALL 过滤、或把 order_user_cnt
+                    # 跨窗口相加，结果偏大且不会报错，是最难发现的一类问题。
+                    guard = sql_guard.validate(sql, strict_dialect=False)
+                    if not guard['ok']:
+                        st.error(f"SQL 不安全，已拒绝执行：{guard['error']}")
+                        st.stop()
+                    for t in guard['trap_issues']:
+                        st.warning(f"口径提示：{t}")
 
                     df=ch.query_df(sql)
 

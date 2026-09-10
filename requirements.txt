@@ -1,11 +1,15 @@
-# 数据仓库
-clickhouse-connect>=0.7.0
-dbt-clickhouse>=1.7.0
+# 数据仓库（Doris 走 MySQL 协议查询 + Stream Load HTTP 导入）
+pymysql>=1.1.0
+requests>=2.31.0
 
 # 数据处理
 pandas>=2.0.0
 numpy>=1.26.0
 tabulate>=0.9.0
+
+# Agent + MCP 链路监控
+mcp>=1.0          # 运维工具 MCP server
+kafka-python>=2.0.0  # Kafka 消费积压探针
 
 # AI / LLM
 openai>=1.0.0
@@ -13,19 +17,32 @@ langchain==0.3.25
 langchain-openai==0.3.16
 langchain-community==0.3.24
 
-# 向量数据库
+# 向量库（RAG 知识库）
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
 
-# Kafka
-kafka-python>=2.0.0
+# SQL 解析（NL2SQL 的口径体检与只读校验）
+sqlglot>=25.0.0
 
 # Web 界面
 streamlit>=1.33.0
 plotly>=5.0.0
 
-# 工作流调度
-apache-airflow>=2.8.0
-
 # 工具
 python-dotenv>=1.0.0
+pyyaml>=6.0
+
+# Flink AI 风控算子的异步 LLM 调用
+aiohttp>=3.9.0
+
+# 说明：
+#
+# 这里没有 apache-airflow。调度跑在 docker-compose 的 airflow 容器里，
+# 不需要装到宿主机 —— Airflow 在 Windows 上直接 pip install 基本装不起来，
+# 把它写进 requirements 只会让「pip install -r」这一步失败。
+# ADS 刷新和对账脚本本身不依赖 Airflow，可以直接命令行跑。
+#
+# 这里也没有 apache-flink。主链路全部用 Flink SQL 编写，
+# 由 flink/submit.ps1 提交到集群；connector jar 见 flink/download_jars.ps1。
+# 只有 flink/ai_risk/risk_operator.py 是 PyFlink 写的可选算子，
+# 要跑它再单独装 apache-flink>=1.18。

@@ -2,143 +2,115 @@
 
 ## 数据库总览
 
-本数仓基于巴西电商平台 Olist 的真实交易数据，时间范围 2016年9月 ~ 2018年9月，共四个数据库层次：ods（原始层）、dwd（明细层）、dws（汇总层）、ads（应用层）。
+本数仓是**纯实时链路**：数据由 Flink CDC 从 MySQL 业务库（库名 `mall`）的 binlog 实时捕获，
+经 Kafka 分层、Flink SQL 加工后写入 Apache Doris。没有历史批数据 ——
+能查到的时间范围就是链路运行以来的这几天。
+
+四个数据库层次：
+
+| 库 | 定位 | 谁写入 |
+|----|------|--------|
+| `dwd` | 明细层：订单累积快照 | Flink CDC 作业（秒级） |
+| `dws` | 汇总层：窗口聚合 + BITMAP 日活 | Flink 窗口作业 / ADS 刷新任务 |
+| `ads` | 应用层：视图、物化视图、排行结果表 | 视图查询即算 / 调度刷新 |
+| `stream` | 运维层：迟到数据、作业指标、告警 | Flink 分流 / 采集脚本 |
+
+**ODS 层不在 Doris**。实时链路的 ODS 落在 Kafka 的 `dwd_trade_order` /
+`dwd_trade_pay` / `dwd_trade_refund` 三个 topic 上，是给下游流作业消费的中间态，
+不是给人查的。每多落一次库就多一次写入与读取，延迟逐层累加。
+
+**维表也不在 Doris**。Flink 直接用 mysql-cdc 读业务库的 `sku_info` /
+`base_category3` / `base_province` 做 lookup join，改价、下架能被实时感知。
 
 ---
 
-## ODS 层（原始数据层）
+## DWD 层
 
-### ods.orders_raw — 订单主表
+### dwd.order_snapshot — 订单累积快照
 
-| 字段名 | 类型 | 业务含义 |
-|--------|------|---------|
-| order_id | String | 订单唯一标识，全局唯一 |
-| customer_id | String | 客户ID，对应 customers 表 |
-| order_status | String | 订单状态，见状态说明 |
-| order_purchase_ts | DateTime | 下单时间 |
-| order_approved_ts | DateTime | 支付审核通过时间 |
-| order_delivered_ts | DateTime | 实际送达客户时间 |
-| order_estimated_ts | DateTime | 预计送达时间 |
-
-### ods.order_items_raw — 订单商品明细表
+一个订单一行，记录它**当前**的状态。同一个 `order_id` 会随着状态流转被 CDC
+写入很多次，靠 Unique Key 按主键覆盖 + `update_time` 做 sequence 列收敛。
 
 | 字段名 | 类型 | 业务含义 |
 |--------|------|---------|
-| order_id | String | 订单ID，关联 orders 表 |
-| order_item_id | UInt32 | 商品在订单内的序号（从1开始） |
-| product_id | String | 商品ID |
-| seller_id | String | 卖家ID |
-| price | Float64 | 商品售价（不含运费），单位：巴西雷亚尔(R$) |
-| freight_value | Float64 | 运费，单位：巴西雷亚尔(R$) |
-| shipping_limit_ts | DateTime | 卖家最晚发货时间 |
+| create_date | DATE | 下单日期，分区列 |
+| order_id | BIGINT | 订单ID，主键 |
+| update_time | DATETIME(3) | 业务库更新时间，**sequence 列**，事件时间大的版本获胜 |
+| user_id | BIGINT | 用户ID |
+| province_name | VARCHAR | 省份名（已在 Flink 侧维度退化） |
+| region_name | VARCHAR | 大区名：华北/华东/华南/华中/西南/西北/东北 |
+| order_status | VARCHAR | 订单状态，取值见业务规则手册 |
+| total_amount | DECIMAL(16,2) | 订单总额 |
+| activity_reduce / coupon_reduce | DECIMAL(16,2) | 活动优惠 / 优惠券优惠 |
+| freight_amount | DECIMAL(16,2) | 运费 |
+| create_time / payment_time / ship_time / receive_time | DATETIME(3) | 各状态发生时刻 |
+| pay_lag_seconds | INT | 下单到支付耗时（秒），未支付为 NULL |
+| ingest_time | DATETIME(3) | Flink 落库时间 |
 
-### ods.customers_raw — 客户表
-
-| 字段名 | 类型 | 业务含义 |
-|--------|------|---------|
-| customer_id | String | 客户ID（每个订单生成一个，不是唯一用户标识） |
-| customer_unique_id | String | 真实用户唯一标识，同一用户多次购买对应同一个 unique_id |
-| city | String | 客户所在城市（葡萄牙语） |
-| state | String | 客户所在州，两位缩写，如 SP=圣保罗、RJ=里约热内卢 |
-
-### ods.products_raw — 商品表
-
-| 字段名 | 类型 | 业务含义 |
-|--------|------|---------|
-| product_id | String | 商品唯一标识 |
-| product_category_name | String | 商品品类名称（葡萄牙语） |
-| product_weight_g | Float64 | 商品重量（克） |
-| product_length_cm | Float64 | 商品长度（厘米） |
-| product_height_cm | Float64 | 商品高度（厘米） |
-| product_width_cm | Float64 | 商品宽度（厘米） |
+**这张表能回答、而窗口聚合表回答不了的问题**：现在有多少订单处于某状态、
+取消率、支付转化率、下单到支付要多久。因为它记录的是状态，不是事件计数。
 
 ---
 
-## DWD 层（明细数据层）
+## DWS 层
 
-### dwd.order_detail — 订单明细宽表
-
-这是数仓最核心的宽表，将订单、商品、客户、商品四张表关联后生成，粒度为"订单商品行"（一条记录 = 一个订单里的一件商品）。
+### dws.trade_window_agg — 交易域窗口聚合
 
 | 字段名 | 类型 | 业务含义 |
 |--------|------|---------|
-| order_id | String | 订单ID |
-| order_item_id | UInt32 | 商品序号 |
-| customer_id | String | 客户ID |
-| customer_unique_id | String | 用户唯一ID（去重计算用户数时用此字段） |
-| city | String | 客户城市 |
-| state | String | 客户所在州 |
-| product_id | String | 商品ID |
-| product_category | String | 商品品类（已标准化，下划线分隔） |
-| seller_id | String | 卖家ID |
-| order_status | String | 订单状态 |
-| price | Float64 | 商品价格（GMV的计算基础） |
-| freight_value | Float64 | 运费 |
-| total_amount | Float64 | price + freight_value，订单总金额 |
-| order_date | Date | 下单日期 |
-| order_year | UInt16 | 下单年份 |
-| order_month | UInt8 | 下单月份（1-12） |
-| order_hour | UInt8 | 下单小时（0-23） |
-| delivery_days | Int32 | 配送天数（下单到送达的自然日数） |
-| is_delivered | UInt8 | 是否已送达：1=已送达，0=未送达 |
+| stat_date | DATE | 统计日期，分区列 |
+| window_type | VARCHAR | `TUMBLE_1M` 分钟滚动窗口 / `CUMULATE_1D` 当日累计窗口 |
+| window_start / window_end | DATETIME(3) | 窗口起止 |
+| category1_name | VARCHAR | 一级品类，**`ALL` 表示不分品类的汇总行** |
+| region_name | VARCHAR | 大区，**`ALL` 表示不分大区的汇总行** |
+| order_cnt | BIGINT | 订单数（窗口内去重） |
+| order_user_cnt | BIGINT | 下单用户数，**仅在单个窗口内有效** |
+| sku_num | BIGINT | 商品件数 |
+| order_amount | DECIMAL(18,2) | **GMV，字段名不叫 gmv** |
+| max_order_price | DECIMAL(16,2) | 窗口内最高单价 |
+| abnormal_price_cnt | BIGINT | 成交价显著偏离标价的条数 |
+| max_lag_seconds / avg_lag_seconds | INT | 窗口内端到端延迟 |
+
+### dws.pay_window_agg — 支付域窗口聚合
+
+维度是 `payment_type`（`ALL` 表示汇总）。字段：`pay_cnt`、`pay_user_cnt`、
+`pay_amount`、`max_lag_seconds`、`avg_lag_seconds`。
+
+### dws.user_active_daily — 用户日活（BITMAP）
+
+| 字段名 | 类型 | 业务含义 |
+|--------|------|---------|
+| dt | DATE | 日期 |
+| region_name | VARCHAR | 大区，`ALL` 表示全国 |
+| order_cnt / order_amount | SUM 聚合 | 当日订单数 / 成交额 |
+| uv_bitmap | BITMAP | 当日下单用户位图 |
+| pay_uv_bitmap | BITMAP | 当日支付用户位图 |
+
+BITMAP 列不能直接 SELECT，取基数用 `BITMAP_UNION_COUNT(uv_bitmap)`。
+由 `pipelines/refresh_ads.py` 定时从 `dwd.order_snapshot` 刷新。
 
 ---
 
-## DWS 层（汇总数据层）
+## ADS 层
 
-### dws.order_daily — 每日订单汇总表
-
-粒度：每天一行。
-
-| 字段名 | 类型 | 业务含义 |
-|--------|------|---------|
-| dt | Date | 统计日期 |
-| order_cnt | UInt64 | 当日订单数（去重） |
-| item_cnt | UInt64 | 当日商品件数 |
-| gmv | Float64 | 当日GMV（商品成交额，不含运费） |
-| freight_total | Float64 | 当日运费总额 |
-| user_cnt | UInt64 | 当日下单用户数（按customer_unique_id去重） |
-| delivered_cnt | UInt64 | 当日已送达订单数 |
-| cancel_cnt | UInt64 | 当日取消订单数 |
-| avg_order_value | Float64 | 当日客单价 = gmv / order_cnt |
-
-### dws.category_daily — 品类每日汇总表
-
-粒度：每天每个品类一行。
-
-| 字段名 | 类型 | 业务含义 |
-|--------|------|---------|
-| dt | Date | 统计日期 |
-| product_category | String | 商品品类名称 |
-| order_cnt | UInt64 | 该品类当日订单数 |
-| gmv | Float64 | 该品类当日GMV |
-| avg_price | Float64 | 该品类当日平均售价 |
+| 对象 | 类型 | 说明 |
+|------|------|------|
+| ads.v_today_trade_kpi | 视图 | 今日累计交易 KPI，一次点查 |
+| ads.v_today_pay_kpi | 视图 | 今日累计支付 KPI |
+| ads.v_today_conversion | 视图 | 支付转化漏斗，来自订单快照 |
+| ads.v_minute_trend | 视图 | 近 2 小时分钟趋势 |
+| ads.mv_hourly_trend | 异步物化视图 | 小时趋势，每 5 分钟刷新 |
+| ads.category_rank | 结果表 | 当日品类排行，调度刷新 |
+| ads.region_rank | 结果表 | 当日大区排行，`uv` 列来自 BITMAP |
+| ads.reconcile_result | 结果表 | 业务库与数仓对账差异 |
 
 ---
 
-## ADS 层（应用数据层）
+## stream 运维层
 
-### ads.monthly_kpi — 月度核心KPI表
-
-粒度：每月一行，直接面向报表展示。
-
-| 字段名 | 类型 | 业务含义 |
-|--------|------|---------|
-| ym | String | 年月，格式：2018-01 |
-| gmv | Float64 | 月度GMV |
-| order_cnt | UInt64 | 月度订单数 |
-| user_cnt | UInt64 | 月度活跃用户数 |
-| avg_order_value | Float64 | 月度客单价 |
-| mom_gmv_rate | Float64 | GMV环比增长率（%），第一个月为NULL |
-
-### ads.state_sales_rank — 省份销售排行表
-
-粒度：每月每个州一行。
-
-| 字段名 | 类型 | 业务含义 |
-|--------|------|---------|
-| dt_month | String | 年月，格式：2018-01 |
-| state | String | 州名缩写 |
-| gmv | Float64 | 该州当月GMV |
-| order_cnt | UInt64 | 该州当月订单数 |
-| rank_by_gmv | UInt32 | 按GMV排名（1=最高） |
+| 表 | 说明 |
+|----|------|
+| stream.late_records | 超出 watermark 容忍度的记录，带 Kafka partition/offset，可按位点回放 |
+| stream.ai_quality_alerts | 规则命中的质检告警及 LLM 处置建议 |
+| stream.job_metrics | Flink 作业状态、背压、checkpoint 耗时、重启次数 |
+| stream.ai_risk_result | 实时 AI 风控研判结果，只存需复核的订单 |

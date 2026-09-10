@@ -1,106 +1,118 @@
 # 业务规则手册
 
-## 订单状态说明
+## 订单状态机
 
-本平台订单共有以下状态，存储在 order_status 字段中：
+订单状态存储在 `dwd.order_snapshot.order_status`，**全大写**：
 
 | 状态值 | 中文含义 | 说明 |
 |--------|---------|------|
-| created | 已创建 | 订单已创建但未付款 |
-| approved | 已审核 | 支付已通过审核 |
-| invoiced | 已开票 | 已生成发票，等待发货 |
-| processing | 处理中 | 卖家正在准备商品 |
-| shipped | 已发货 | 商品已交给物流 |
-| delivered | 已送达 | 客户已收到商品（最终成功状态） |
-| canceled | 已取消 | 订单已取消 |
-| unavailable | 不可用 | 商品不可用，订单无法完成 |
+| CREATED | 已下单 | 订单已创建，尚未支付 |
+| PAID | 已支付 | 支付回调成功 |
+| SHIPPED | 已发货 | 商品已交给物流 |
+| DELIVERED | 已送达 | 终态成功 |
+| CANCELED | 已取消 | 终态失败，可能发生在支付前或支付后 |
+| REFUNDED | 已退款 | 终态失败，发生在支付之后 |
+
+流转路径：
+
+```
+CREATED ──85%──> PAID ──97%──> SHIPPED ──> DELIVERED
+   │                 │
+   └──15%──> CANCELED└──3%──> REFUNDED
+```
 
 **重要规则：**
-- 计算实际成交金额时，只统计 delivered 状态
-- 计算 GMV 时，包含所有状态（行业惯例）
-- canceled 和 unavailable 是终态失败状态
-- delivered 是终态成功状态
+- 每一次状态流转都是业务库上的一条 UPDATE，CDC 捕获到的是同一主键的多条变更
+- 判断「已支付」要包含 `PAID`、`SHIPPED`、`DELIVERED` 三个状态，
+  只查 `PAID` 会漏掉已经发货和送达的订单
+- 快照表里读到的一定是当前状态：Unique Key 按主键覆盖，
+  `update_time` 作为 sequence 列保证迟到的旧状态盖不掉新状态
 
 ---
 
-## 巴西州名对照表
+## 数据一致性是怎么保证的
 
-state 字段为两位大写字母缩写，对应巴西各州：
+三件事叠在一起，缺一不可：
 
-| 缩写 | 州名（葡语） | 区域 | 经济特点 |
-|------|------------|------|---------|
-| SP | São Paulo | 东南部 | 巴西最大经济体，电商最发达 |
-| RJ | Rio de Janeiro | 东南部 | 第二大城市，旅游+金融 |
-| MG | Minas Gerais | 东南部 | 工业重镇 |
-| RS | Rio Grande do Sul | 南部 | 农业+工业 |
-| PR | Paraná | 南部 | 农业大州 |
-| SC | Santa Catarina | 南部 | 制造业发达 |
-| BA | Bahia | 东北部 | 东北部最大经济体 |
-| GO | Goiás | 中西部 | 农业州 |
-| DF | Distrito Federal | 中西部 | 首都巴西利亚所在地 |
-| PE | Pernambuco | 东北部 | 东北部重要港口 |
-| AM | Amazonas | 北部 | 亚马逊雨林，电商欠发达 |
-| RO | Rondônia | 北部 | 偏远州，订单量少 |
+**1. Flink 两阶段提交（写入端）**
+Doris sink 开启 `sink.enable-2pc`，Stream Load 的事务与 Flink checkpoint 对齐。
+checkpoint 成功才提交，失败则整批回滚。
 
-**分析规律：** SP 州订单量通常占全国 40%+ ，东南部三州（SP+RJ+MG）合计占 60%+。
+**2. Doris Unique Key（Sink 端幂等）**
+作业从 checkpoint 恢复时会重放一段数据。Unique Key 按主键覆盖，
+重放多少次结果都一样 —— 这一环不成立的话，两阶段提交也保证不了端到端一致。
 
----
+**3. Sequence Column（乱序容忍）**
+binlog 事件经过 Kafka 多分区、Flink 多并行度之后，到达顺序不再保证。
+没有 sequence column 时是「后写入的赢」，一条迟到的 CREATED 能把已经是
+DELIVERED 的订单改回去。指定 `update_time` 为 sequence 列后变成
+「事件时间大的赢」，旧状态永远盖不掉新状态。
 
-## 商品品类说明
+**这三条合起来的效果**：同一份数据无论被处理几次、以什么顺序到达，
+最终都收敛到同一个正确值，不会重复计算，也不会被旧状态覆盖。
 
-product_category 字段经过标准化处理（下划线分隔），主要品类含义：
-
-| 品类名 | 中文含义 | 特点 |
-|--------|---------|------|
-| Beleza_Saude | 美妆健康 | 销售额第一，高频消费品 |
-| Relogios_Presentes | 手表礼品 | 客单价高，节日礼品 |
-| Cama_Mesa_Banho | 床上用品 | 家居必需品，稳定需求 |
-| Esporte_Lazer | 运动休闲 | 巴西体育文化浓厚 |
-| Informatica_Acessorios | 电脑配件 | 数码配件，标品 |
-| Moveis_Decoracao | 家具装饰 | 客单价高，件数少 |
-| Utilidades_Domesticas | 家居用品 | 日常必需 |
-| Ferramentas_Jardim | 工具园艺 | 季节性较强 |
-| Automotivo | 汽车用品 | 巴西汽车普及率高 |
-| Telefonia | 手机通讯 | 高客单价品类 |
+**怎么验证**：`pipelines/reconcile.py` 定时拿 MySQL 和 Doris 的同口径数字比一遍，
+差异落 `ads.reconcile_result`。设计上的保证需要有人持续检验。
 
 ---
 
-## 时间规律说明
+## 窗口口径规则（查询时最容易踩的坑）
 
-### 数据时间范围
-- 完整数据：2017年1月 ~ 2018年8月
-- 不完整月份：2016年（平台刚起步）、2018年9月（数据截断，仅145元GMV）
-- 做趋势分析时建议过滤掉 2016年 和 2018-09
+### 规则一：window_type 必须显式过滤
 
-### 电商节日规律
-- **11月黑色星期五（Black Friday）：** 巴西最大电商促销节，订单量峰值在此
-- **圣诞节前（12月）：** 礼品类订单明显增加
-- **情人节（2月）：** 手表、礼品类销售高峰
-- **儿童节（10月12日）：** 玩具类销售高峰
+`dws.trade_window_agg` 一张表装了两种窗口。不加 `window_type` 过滤，
+`TUMBLE_1M` 的分钟明细和 `CUMULATE_1D` 的累计值会被混在一起，结果毫无意义。
 
-### 已验证的业务规律
-- 2017年11月24日（黑色星期五）单日订单量 1166 单，是日均(160单)的 7.3 倍
-- 每年年初（1月）通常有一波增长（节后补货+新年促销）
-- 2月因月份短且节后消费疲软，订单量通常环比下降
+### 规则二：两个维度列必须同时约束
+
+Flink 用 GROUPING SETS 一次算出「整体 / 分品类 / 分大区」三个粒度，
+靠 `category1_name` / `region_name` 取值 `'ALL'` 区分汇总行与明细行。
+
+```sql
+-- 查整体
+WHERE category1_name = 'ALL' AND region_name = 'ALL'
+-- 按品类下钻
+WHERE category1_name <> 'ALL' AND region_name = 'ALL'
+-- 按大区下钻
+WHERE region_name <> 'ALL' AND category1_name = 'ALL'
+```
+
+只约束一个维度，另一个维度的汇总行会和明细行叠加，**指标翻倍且不报错** ——
+这是最难发现的一类错误。`dws.pay_window_agg` 同理，维度列是 `payment_type`。
+
+### 规则三：跨窗口的用户数不能相加
+
+见指标手册的 UV 章节。`order_user_cnt` 只在单个窗口内有效。
 
 ---
 
-## 数仓层次使用指南
+## 事务事实表 vs 累积快照
 
-### 什么场景用哪张表？
+实时数仓建模里最需要分清的一组概念，本项目的分层直接建立在它上面。
 
-| 分析需求 | 推荐使用的表 | 原因 |
-|---------|------------|------|
-| 月度GMV趋势 | ads.monthly_kpi | 已预计算，查询最快 |
-| 日度GMV趋势 | dws.order_daily | 每日粒度，性能好 |
-| 品类销售分析 | dws.category_daily | 已按品类聚合 |
-| 地域销售排名 | ads.state_sales_rank | 已计算排名 |
-| 用户行为分析 | dwd.order_detail | 最细粒度，字段最全 |
-| 配送时效分析 | dwd.order_detail | delivery_days 字段 |
-| 卖家分析 | dwd.order_detail | seller_id 字段 |
+| | 事务事实表 | 累积快照 |
+|---|---|---|
+| 记录什么 | 一次业务动作 | 一个业务实体的当前状态 |
+| 本项目对应 | Kafka 的 `dwd_trade_order` / `dwd_trade_pay` | `dwd.order_snapshot` |
+| 数据来源 | insert-only 的业务表（订单明细、支付流水） | 会反复 UPDATE 的订单主表 |
+| 流的性质 | append-only | changelog（带撤回语义） |
+| 能不能做窗口聚合 | 能 | **不能** |
+| 回答什么问题 | 发生了多少次、多少钱 | 现在有多少处于某状态 |
 
-### 注意事项
-- 不要在 dwd 层查 gmv 字段（不存在），应用 sum(price) 代替
-- 统计用户数必须用 customer_unique_id，不能用 customer_id
-- 查询月份格式用 '2018-01'，日期格式用 '2018-01-15'
-- ClickHouse 时间函数与 MySQL 不同：用 toYear() 而非 YEAR()
+**为什么 changelog 不能做窗口聚合：** Flink 的窗口 TVF（TUMBLE / CUMULATE）
+只接受 append-only 流，把 CDC 的 changelog 直接喂进去会报
+`doesn't support consuming update changes`。这不是一个可以绕过的报错，
+而是在提醒建模分错了 —— 「今天成交了多少钱」算的是事件，
+不该拿「当前有多少订单处于某状态」的表去算。
+
+所以 GMV、支付额走窗口聚合，取消率、支付转化率走累积快照。
+
+---
+
+## 异常价格判定
+
+`is_price_abnormal` 在 DWD 层就打好标记：成交价高于商品标价 1.5 倍
+或低于 0.3 倍，即判为异常。
+
+这类情况通常意味着商品配置错价，或者有人在薅羊毛。
+DWS 层汇总成 `abnormal_price_cnt`，占比超过 5% 时质检器报 `QUALITY` 告警。

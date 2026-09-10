@@ -1,4 +1,14 @@
-version: "3.8"
+# ============================================================
+# 实时数仓 —— Flink CDC + Doris 技术栈
+#
+#   MySQL binlog ──> Flink CDC ──> Kafka ──> Flink SQL 窗口聚合 ──> Doris
+#                        │                        │                  │
+#                   增量快照            watermark / checkpoint   DWD/DWS/ADS 分层
+#                                       (Exactly-Once)
+#
+# Doris 官方镜像要求 FE/BE 使用固定 IP 互相注册，因此显式声明子网。
+# 启动前请确认宿主机 vm.max_map_count >= 2000000（见 README 的「前置要求」）。
+# ============================================================
 
 services:
 
@@ -6,6 +16,9 @@ services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: ai_dw_zookeeper
+    networks:
+      dw_net:
+        ipv4_address: 172.30.80.10
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -16,103 +29,342 @@ services:
       retries: 5
 
   # ─── Kafka ────────────────────────────────────────────────
+  # 分区数提到 3，让 Flink 侧的并行度调优有意义（原来单分区，并行度调了也没用）
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: ai_dw_kafka
     depends_on:
       zookeeper:
         condition: service_healthy
+    networks:
+      dw_net:
+        ipv4_address: 172.30.80.11
     ports:
-      - "9092:9092"       # 外部访问（Python 生产者用）
-      - "29092:29092"     # 内部访问（ClickHouse 消费用）
+      - "9092:9092"       # 宿主机访问（Python 生产者）
+      - "29092:29092"     # 容器内访问（Flink 消费）
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Flink 的 exactly-once Kafka sink 默认把事务超时设成 1 小时，
+      # 而 broker 默认只允许 15 分钟，不调这个值作业会反复重启并报
+      # "The transaction timeout is larger than the maximum value allowed by the broker"。
+      # Flink 官方文档就是要求调高 broker 侧：超时必须大于「作业最长可能的停机时间」，
+      # 否则恢复时事务已经被 broker 判超时中止，数据就真丢了。
+      KAFKA_TRANSACTION_MAX_TIMEOUT_MS: 3600000
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_LOG_RETENTION_HOURS: 24        # 消息保留24小时
-      KAFKA_LOG_SEGMENT_BYTES: 104857600   # 100MB每段
+      KAFKA_NUM_PARTITIONS: 3              # 支撑 Flink 并行消费
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_SEGMENT_BYTES: 104857600
     healthcheck:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 15s
       timeout: 10s
       retries: 5
 
-  # ─── Kafka UI（可视化管理）────────────────────────────────
+  # 可选：只用来肉眼看 topic 和消费组，主链路不依赖它。
+  # 默认不启动，需要时：docker compose --profile tools up -d kafka-ui
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: ai_dw_kafka_ui
+    profiles: ["tools"]
     depends_on:
       kafka:
         condition: service_healthy
+    networks:
+      - dw_net
     ports:
       - "8090:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
 
-  # ─── ClickHouse ────────────────────────────────────────────
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: ai_dw_clickhouse
+  # ─── MySQL 业务库（实时链路的真实源头）────────────────────
+  #
+  # binlog 参数是 Flink CDC 的硬性前提，缺一不可：
+  #   log-bin           开启 binlog，没有它就没有变更流
+  #   binlog_format=ROW 记录行级前后镜像；STATEMENT 格式只记 SQL 文本，
+  #                     CDC 无法还原出「哪一行的哪个字段从什么变成了什么」
+  #   binlog_row_image=FULL  UPDATE 时同时记录变更前后的完整行，
+  #                     否则下游拿不到旧值，做不了状态流转分析
+  #   server-id         binlog 复制协议要求每个客户端有唯一 id，
+  #                     Flink CDC 是以「伪装成从库」的方式拉取的
+  mysql:
+    image: mysql:8.0
+    container_name: ai_dw_mysql
+    networks:
+      dw_net:
+        ipv4_address: 172.30.80.12
     ports:
-      - "8123:8123"
-      - "9000:9000"
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - clickhouse_init:/docker-entrypoint-initdb.d
+      - "3306:3306"
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog_format=ROW
+      - --binlog_row_image=FULL
+      - --binlog_expire_logs_seconds=604800
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+      - --default-time-zone=+08:00
     environment:
-      CLICKHOUSE_USER: admin
-      CLICKHOUSE_PASSWORD: admin123
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: mall
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--user=admin", "--password=admin123", "--query=SELECT 1"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
 
-  # ─── Airflow ───────────────────────────────────────────────
+  # ─── Doris FE（元数据 + 查询入口）──────────────────────────
+  # 9030 = MySQL 协议查询端口，Python/BI 都走它
+  # 8030 = HTTP，Stream Load 导入走它
+  doris-fe:
+    # tag 命名在 2.x 变过：旧版是 2.1.7-fe-x86_64，现行是 fe-2.1.7。
+    # 写错的话 docker compose up 会在拉镜像阶段直接 manifest unknown。
+    image: apache/doris:fe-2.1.7
+    container_name: ai_dw_doris_fe
+    hostname: doris-fe
+    networks:
+      dw_net:
+        ipv4_address: 172.30.80.2
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+    environment:
+      FE_SERVERS: "fe1:172.30.80.2:9010"
+      FE_ID: "1"
+    volumes:
+      - doris_fe_meta:/opt/apache-doris/fe/doris-meta
+      - doris_fe_log:/opt/apache-doris/fe/log
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -h127.0.0.1 -P9030 -uroot -e 'SELECT 1' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  # ─── Doris BE（存储 + 计算）────────────────────────────────
+  doris-be:
+    image: apache/doris:be-2.1.7
+    container_name: ai_dw_doris_be
+    hostname: doris-be
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+    networks:
+      dw_net:
+        ipv4_address: 172.30.80.3
+    ports:
+      - "8040:8040"
+    environment:
+      FE_SERVERS: "fe1:172.30.80.2:9010"
+      BE_ADDR: "172.30.80.3:9050"
+      # BE 启动脚本会检查 ulimit / swap / vm.max_map_count，任一不满足直接退出。
+      # Docker Desktop 的 WSL VM 每次重启都会把 swap 打开、把 max_map_count 重置，
+      # 本地跑不值得每次手工改；这个开关让 BE 跳过检查直接起。
+      # 生产环境请去掉它并按官方要求调内核参数。
+      SKIP_CHECK_ULIMIT: "true"
+    volumes:
+      - doris_be_storage:/opt/apache-doris/be/storage
+      - doris_be_log:/opt/apache-doris/be/log
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # ─── Doris 初始化（建库建表）──────────────────────────────
+  # 等 BE 注册完成后，按序执行 doris/init/*.sql
+  doris-init:
+    image: mysql:8.0
+    container_name: ai_dw_doris_init
+    depends_on:
+      doris-be:
+        condition: service_started
+      doris-fe:
+        condition: service_healthy
+    networks:
+      - dw_net
+    volumes:
+      - ./doris/init:/init:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      echo '等待 Doris BE 注册...';
+      ready=0;
+      for i in $$(seq 1 60); do
+        if mysql -hdoris-fe -P9030 -uroot -N -B -e 'SHOW BACKENDS' 2>/dev/null | grep -qw true; then
+          echo 'BE 已就绪'; ready=1; break;
+        fi;
+        sleep 5;
+      done;
+      if [ \"$$ready\" -ne 1 ]; then
+        echo '';
+        echo 'BE 一直没注册上来，不继续建表。';
+        echo '最常见原因：宿主机 vm.max_map_count 太小，BE 起来后立刻退出。';
+        echo '  Docker Desktop: wsl -d docker-desktop -e sh -c \"echo 2000000 > /proc/sys/vm/max_map_count\"';
+        echo '  Linux         : sudo sysctl -w vm.max_map_count=2000000';
+        echo '然后 docker compose up -d doris-be doris-init';
+        echo '';
+        echo '当前 BE 状态：';
+        mysql -hdoris-fe -P9030 -uroot -e 'SHOW BACKENDS\\G' 2>&1 | grep -E 'Host|Alive|ErrMsg';
+        exit 1;
+      fi;
+      for f in /init/*.sql; do
+        echo \"执行 $$f\";
+        mysql -hdoris-fe -P9030 -uroot --comments < \"$$f\" || exit 1;
+      done;
+      echo 'Doris 初始化完成';
+      "
+    restart: "no"
+
+  # ─── Flink JobManager ──────────────────────────────────────
+  flink-jobmanager:
+    image: flink:1.18.1-scala_2.12-java11
+    container_name: ai_dw_flink_jm
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      dw_net:
+        ipv4_address: 172.30.80.20
+    ports:
+      - "8081:8081"       # Flink Web UI
+    command: jobmanager
+    volumes:
+      - ./flink/lib:/opt/flink/connector-lib:ro   # connector jar（download_jars 脚本下载）
+      - ./flink/sql:/opt/flink/sql:ro
+      - flink_checkpoints:/flink/checkpoints
+      - flink_savepoints:/flink/savepoints
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1200m
+        parallelism.default: 1
+        state.backend: rocksdb
+        state.backend.incremental: true
+        state.checkpoints.dir: file:///flink/checkpoints
+        state.savepoints.dir: file:///flink/savepoints
+        execution.checkpointing.interval: 30s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        execution.checkpointing.timeout: 10min
+        execution.checkpointing.min-pause: 10s
+        execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+        restart-strategy: exponential-delay
+    # 以 root 进入，做两件事后再把权限交还给 flink 用户：
+    #   1. checkpoint / savepoint 用的是 Docker 命名卷，卷目录默认 root 所有，
+    #      而 Flink 进程以 flink 用户运行，不 chown 的话作业一启动就报
+    #      "Failed to create directory for shared state"
+    #   2. 把 connector jar 从只读挂载目录复制进 Flink 的 lib
+    # 官方 docker-entrypoint.sh 检测到自己是 root 时会用 gosu 降权到 flink，
+    # 所以这里 user: root 只影响这两步准备工作，Flink 本身不以 root 运行。
+    user: root
+    entrypoint: >
+      /bin/bash -c "mkdir -p /flink/checkpoints /flink/savepoints && chown -R flink:flink /flink;
+      cp -n /opt/flink/connector-lib/*.jar /opt/flink/lib/ 2>/dev/null;
+      exec /docker-entrypoint.sh jobmanager"
+
+  # ─── Flink TaskManager ─────────────────────────────────────
+  flink-taskmanager:
+    image: flink:1.18.1-scala_2.12-java11
+    container_name: ai_dw_flink_tm
+    depends_on:
+      - flink-jobmanager
+    networks:
+      - dw_net
+    command: taskmanager
+    volumes:
+      - ./flink/lib:/opt/flink/connector-lib:ro
+      - flink_checkpoints:/flink/checkpoints
+      - flink_savepoints:/flink/savepoints
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.memory.process.size: 1728m
+        taskmanager.numberOfTaskSlots: 6
+        state.backend: rocksdb
+        state.backend.incremental: true
+        state.checkpoints.dir: file:///flink/checkpoints
+        state.savepoints.dir: file:///flink/savepoints
+    user: root
+    entrypoint: >
+      /bin/bash -c "mkdir -p /flink/checkpoints /flink/savepoints && chown -R flink:flink /flink;
+      cp -n /opt/flink/connector-lib/*.jar /opt/flink/lib/ 2>/dev/null;
+      exec /docker-entrypoint.sh taskmanager"
+
+  # ─── Airflow（离线批链路调度）──────────────────────────────
+  # 注：sqlite 后端只支持 SequentialExecutor，原配置写 LocalExecutor 是跑不起来的
+  # 可选：ADS 刷新与对账的调度器。常驻流作业不经过它，
+  # 所以最小启动不需要 —— 两个任务都能直接 python 跑。
+  # 需要时：docker compose --profile scheduler up -d airflow
   airflow:
     image: apache/airflow:2.8.1-python3.11
     container_name: ai_dw_airflow
+    profiles: ["scheduler"]
     depends_on:
-      clickhouse:
+      doris-fe:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
+    networks:
+      - dw_net
     ports:
       - "8080:8080"
     volumes:
       - airflow_logs:/opt/airflow/logs
-      - airflow_dags:/opt/airflow/dags
+      # 挂整个项目而不是只挂 pipelines：DAG 里要 import
+      # pipelines.refresh_ads 和 common.doris_client，只挂 dags 目录的话
+      # 这两个包在容器里根本不存在，DAG 一加载就报 ModuleNotFoundError
+      - ./:/opt/airflow/project:ro
       - airflow_data:/opt/airflow/data
     environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/pipelines
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
       AIRFLOW__WEBSERVER__SECRET_KEY: "ai-dw-secret-2025"
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_USER: admin
-      CLICKHOUSE_PASSWORD: admin123
+      PYTHONPATH: /opt/airflow/project
+      DORIS_HOST: doris-fe
+      DORIS_QUERY_PORT: "9030"
+      DORIS_HTTP_PORT: "8030"
+      DORIS_USER: root
+      DORIS_PASSWORD: ""
+      # 对账任务要直连业务库比数
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root123
+      MYSQL_DATABASE: mall
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin123
     command: >
       bash -c "
-        pip install clickhouse-connect kafka-python --quiet &&
-        airflow db init &&
+        pip install --quiet pymysql requests kafka-python &&
+        airflow db migrate &&
         airflow users create --username admin --password admin123
           --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
         airflow webserver --port 8080 &
         airflow scheduler
       "
 
+networks:
+  dw_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.80.0/24
+
 volumes:
-  clickhouse_data:
-  clickhouse_init:
+  mysql_data:
+  doris_fe_meta:
+  doris_fe_log:
+  doris_be_storage:
+  doris_be_log:
+  flink_checkpoints:
+  flink_savepoints:
   airflow_logs:
-  airflow_dags:
   airflow_data:

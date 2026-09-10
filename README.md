@@ -1,67 +1,74 @@
-# 🤖 AI 智能数仓系统
+# 🌊 实时数仓（Flink CDC + Doris）
 
-> 基于巴西电商真实数据，从零构建 AI 增强数据仓库。覆盖离线批处理与实时流处理双链路，集成 NL2SQL、RAG 知识库、LangChain Agent 三大 AI 能力。
+> 电商实时数据仓库。用 **Flink CDC** 监听 MySQL 业务库的订单变更，
+> 经 Kafka 分层、Flink SQL 加工后写入 **Apache Doris**，
+> 实时输出 GMV、支付转化、地域与品类等经营指标，并支持用中文直接查数。
+>
+> 覆盖 watermark 乱序处理、主键幂等与 sequence 防覆盖、effectively-once 端到端一致性、
+> BITMAP 精确去重、以及一套 Agent + MCP 的链路健康监控。
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue)](https://python.org)
-[![ClickHouse](https://img.shields.io/badge/ClickHouse-24.3-yellow)](https://clickhouse.com)
-[![LangChain](https://img.shields.io/badge/LangChain-0.3.25-green)](https://langchain.com)
+[![Flink](https://img.shields.io/badge/Apache_Flink-1.18-e6526f)](https://flink.apache.org)
+[![Doris](https://img.shields.io/badge/Apache_Doris-2.1-1f6feb)](https://doris.apache.org)
 [![Kafka](https://img.shields.io/badge/Apache_Kafka-7.5-red)](https://kafka.apache.org)
-[![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
+[![MySQL](https://img.shields.io/badge/MySQL-8.0-00758f)](https://mysql.com)
+[![Python](https://img.shields.io/badge/Python-3.11-blue)](https://python.org)
 
 ---
 
-## 📋 目录
-
-- [项目简介](#项目简介)
-- [系统架构](#系统架构)
-- [技术栈](#技术栈)
-- [六个阶段](#六个阶段)
-- [核心功能演示](#核心功能演示)
-- [快速启动](#快速启动)
-- [项目结构](#项目结构)
-- [数据集](#数据集)
-
----
-
-## 项目简介
-
-本项目以 **Kaggle 巴西电商平台 Olist 真实数据**（112,650 条订单）为底座，分六个阶段逐步构建一个具备 AI 能力的完整数据仓库系统。
-
-**核心价值：让不懂 SQL 的业务人员也能直接用中文查数据、问问题、获取分析洞察。**
-
-| 指标 | 数值 |
-|------|------|
-| 总 GMV | R$ 13,591,644 |
-| 订单总数 | 98,666 单 |
-| 独立用户数 | 97,729 人 |
-| 平均客单价 | R$ 132.71 |
-| 知识库文本块 | 36 个 |
-| Agent 最大推理步数 | 10 步 |
-
----
-
-## 系统架构
+## 架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      应用层（Streamlit）                      │
-│   智能问答  │  异常检测Agent  │  自动周报Agent  │  自由分析Agent│
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                      AI 能力层                               │
-│   NL2SQL（DeepSeek）  │  RAG（ChromaDB）  │  Agent（LangChain）│
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                   数仓存储层（ClickHouse）                    │
-│  ADS（应用层）│ DWS（汇总层）│ DWD（明细层）│ ODS（原始层）    │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│              数据接入层                                       │
-│    批量 ETL（Python）         Kafka 实时流                    │
-└─────────────────────────────────────────────────────────────┘
+   ┌──────────────────────────────────────────────────────────────┐
+   │  MySQL 业务库 (mall)                                          │
+   │  订单状态机：CREATED → PAID → SHIPPED → DELIVERED             │
+   │  每次状态流转 = 一条 UPDATE = 一条 binlog                      │
+   └───────────────────────────┬──────────────────────────────────┘
+                               │  binlog (ROW / FULL)
+   ┌───────────────────────────▼──────────────────────────────────┐
+   │  Flink CDC  作业 rtdw-dwd                                     │
+   │                                                               │
+   │  增量快照算法（全量可并行、可 checkpoint、不锁表）              │
+   │  维表 lookup join（改价下架实时感知）· 维度退化                 │
+   │                                                               │
+   │  事务事实（append-only）─┐        累积快照（changelog）─┐       │
+   └──────────────────────────┼───────────────────────────────┼───┘
+                              │                               │
+        ┌─────────────────────▼──────────┐                    │
+        │  Kafka  dwd_trade_order         │                    │
+        │         dwd_trade_pay           │                    │
+        │         dwd_trade_refund        │                    │
+        └─────────────────────┬───────────┘                    │
+                              │                                │
+   ┌──────────────────────────▼────────────────────────┐       │
+   │  Flink SQL  作业 rtdw-dws                          │       │
+   │                                                    │       │
+   │  TUMBLE 1min + CUMULATE 1day 窗口聚合               │       │
+   │  GROUPING SETS 一次算三个粒度                        │       │
+   │  watermark 5min 乱序容忍                            │       │
+   │  CURRENT_WATERMARK() 分流迟到数据                    │       │
+   │  RocksDB 状态后端 · 30s checkpoint · EXACTLY_ONCE   │       │
+   └──────────────────────────┬─────────────────────────┘       │
+                              │  Stream Load（主键幂等写入）      │
+   ┌──────────────────────────▼─────────────────────────────────▼┐
+   │                      Apache Doris                            │
+   │                                                              │
+   │  DWD  order_snapshot     Unique + MoW + sequence 防乱序覆盖   │
+   │  DWS  trade_window_agg   Unique（Flink 已聚合 → 主键幂等）     │
+   │       pay_window_agg     Unique                              │
+   │       user_active_daily  Aggregate + BITMAP 跨天精确去重       │
+   │  ADS  视图 + 异步物化视图 + 调度刷新的排行/对账结果表            │
+   │  stream  迟到兜底 · 作业指标 · 质检告警 · 风控结果              │
+   └──────┬────────────────────────────────────────────┬─────────┘
+          │                                            │
+   ┌──────▼──────────────────────┐      ┌──────────────▼─────────┐
+   │  独立调度（Airflow）          │      │  实时看板 / NL2SQL      │
+   │  ADS 刷新 · BITMAP · 对账     │      │  RAG · LangChain Agent │
+   └─────────────────────────────┘      └────────────────────────┘
+                          ┌───────────────────────────┐
+                          │  Agent + MCP 链路监控      │
+                          │  Flink REST · Kafka Lag   │
+                          │  Doris 探活 → 健康卡 + 诊断 │
+                          └───────────────────────────┘
 ```
 
 ---
@@ -70,90 +77,153 @@
 
 | 类别 | 技术 |
 |------|------|
-| 存储引擎 | ClickHouse 24.3（列式 OLAP） |
-| 数据建模 | dbt-clickhouse |
-| 工作流调度 | Apache Airflow 2.8 |
-| 消息队列 | Apache Kafka + Zookeeper |
+| 变更捕获 | Flink CDC 3.1（mysql-cdc，增量快照） |
+| 流处理引擎 | Apache Flink 1.18（纯 Flink SQL） |
+| 消息队列 | Apache Kafka 7.5（DWD 分层落 topic） |
+| 存储 / OLAP | Apache Doris 2.1（MySQL 协议查询 + Stream Load 导入） |
+| 业务库 | MySQL 8.0（binlog ROW / FULL） |
+| 调度 | Apache Airflow 2.8（ADS 刷新与对账，与流作业运行时分离） |
 | 大语言模型 | DeepSeek-Chat（OpenAI 兼容） |
-| AI 框架 | LangChain 0.3.25（Tool Calling 模式） |
-| 向量数据库 | ChromaDB + SentenceTransformers |
-| Embedding 模型 | paraphrase-multilingual-MiniLM-L12-v2 |
-| 前端界面 | Streamlit 1.33 |
-| 容器化 | Docker Compose |
+| AI 框架 | LangChain 0.3（Tool Calling）+ MCP（运维工具） |
+| 向量库 | ChromaDB + SentenceTransformers |
+| 前端 | Streamlit + Plotly |
 
 ---
 
-## 六个阶段
+## 几个关键设计点
 
-### 阶段一：数仓基础建设 ✅
-基于 ClickHouse 构建 ODS/DWD/DWS/ADS 四层数仓，使用 ReplacingMergeTree 引擎保障 ETL 幂等性，Airflow 实现全链路自动化调度。
+### 1. 为什么源头是 MySQL 而不是直接往 Kafka 灌 JSON
 
-```
-Kaggle CSV → etl_ods.py → etl_dwd.py → etl_dws_ads.py → verify.py
-344,483行     112,650行     19,606行      583行
-```
+`mock/business_simulator.py` 只操作 MySQL 业务库，完全不知道 Kafka 和 Flink 的存在。
+数据进入实时链路是 Flink CDC 读 binlog 的结果 —— 和真实生产环境里业务系统与数仓的
+关系一致：**业务系统不为数仓而写**。
 
-### 阶段二：NL2SQL 自然语言查询 ✅
-基于 DeepSeek 实现中文 → ClickHouse SQL 转换。动态注入真实表结构，通过正负面约束解决字段歧义，5 个业务查询场景全部通过。
+它的核心是一个订单状态机，不是「随机生成一条带终态的订单」。
+每次状态流转都是业务库上的一条 UPDATE，于是 CDC 捕获到同一主键的多条变更。
+这才让下游的两件事有真实意义：Unique Key 幂等、sequence 防乱序。
 
-```python
-# 示例：用中文查数据
-result = nl2sql("每个月的GMV是多少？")
-# → 自动生成 SQL → 执行 → 返回结果 + AI 洞察
-```
+### 2. 事务事实 vs 累积快照：一个必须先想清楚的建模问题
 
-### 阶段三：RAG 知识库问答 ✅
-构建包含数据字典、指标口径、业务规则的向量知识库（36 个文本块），实现智能路由：自动判断"查数据"还是"问概念"。6 个知识问答准确率 100%。
+CDC 读出来的是 changelog（带撤回语义），而窗口聚合 TVF 只接受 append-only 流。
+直接把 CDC 流喂给窗口会报 `doesn't support consuming update changes`。
 
-### 阶段四：LangChain Agent ✅
-基于 **Tool Calling 模式**（解决 ReAct + DeepSeek 兼容性问题）构建三个专用 Agent：
+解法不是绕过报错，而是按数仓的方式把两类表分开：
 
-| Agent | 步骤数 | 核心能力 |
-|-------|--------|----------|
-| 销售异常检测 | 5步 | 自动识别黑五峰值（偏差10.48倍），发现预热→爆发→余热三阶段 |
-| 自动周报生成 | 9步 | 多维数据查询，主动发现数据异常并标注预警 |
-| 自由分析 | 10步 | 自主追加3个分析维度，识别狂欢节低谷和春季旺季 |
+| | 事务事实表 | 累积快照 |
+|---|---|---|
+| 来源 | insert-only 的 `order_detail` / `payment_info` | 会反复 UPDATE 的 `order_info` |
+| 落到哪 | Kafka topic，供 DWS 窗口聚合 | Doris Unique 表，upsert |
+| 回答 | 发生了多少次、多少钱（GMV） | 现在有多少处于某状态（转化率） |
 
-### 阶段五：AI 数仓建设助手 ✅
-上传任意 CSV → AI 自动识别字段含义 → 生成 ODS 建表 SQL → 建表写入 → AI 生成 ETL 逻辑 → 数据质量检测 → 生成 dbt 模型文件。
+### 3. 数据一致性：三件事叠起来才成立
 
-### 阶段六：Kafka 实时流处理 ✅
-Python 生产者模拟实时订单流 → Kafka → ClickHouse Kafka 引擎自动消费（秒级）→ 物化视图落地 → 分钟级聚合 → AI 异常检测 → 告警写入。
+- **Flink checkpoint（EXACTLY_ONCE 模式）** —— 算子状态与 Kafka 位点一起快照，故障恢复不丢不重算
+- **Doris Unique Key + Merge-on-Write** —— 作业从 checkpoint 恢复会重放一段数据，按主键覆盖使重放幂等
+- **Sequence Column** —— `update_time` 作为 sequence 列，从「后写入的赢」改成「事件时间大的赢」，
+  迟到的 CREATED 盖不掉已经是 DELIVERED 的订单
 
-```
-累计流入：4,247+ 条  |  分钟聚合：~171单/分钟  |  GMV：R$55,421/分钟
-```
+三条合起来：同一份数据无论被处理几次、以什么顺序到达，最终都收敛到同一个正确值 ——
+投递语义是 at-least-once，写入是幂等的，端到端效果是 effectively-once。
+
+> **为什么不用 Doris sink 的两阶段提交（`sink.enable-2pc`）**
+> 2PC 能把 sink 做到严格 Exactly-Once，但它要求导入 label 在 Doris 侧全局唯一且状态干净。
+> 作业每次全新提交、失败重启、事务被中止后，连接器都要清理上一轮遗留事务，
+> 本地反复起停时很容易在 checkpoint 1 就撞上 `Exist label abort finished`，之后每次重启
+> 又从 checkpoint 1 开始，陷入死循环。既然所有目标表都是 Unique Key，幂等已经由模型保证，
+> 2PC 带来的只是额外的故障面，所以这里刻意关掉。`flink/sql/00_init.sql` 里有完整说明。
+
+**并且这个保证是被持续检验的** —— `pipelines/reconcile.py` 定时拿 MySQL 和 Doris
+的同口径数字比一遍，差异落 `ads.reconcile_result`。
+
+### 4. 迟到数据不静默丢失
+
+watermark 给 5 分钟乱序容忍，这个范围内的乱序数据正常进窗口。
+超出的进不了原窗口 —— 窗口 TVF 直接丢弃且不留痕迹。
+
+DWS 作业用 `CURRENT_WATERMARK(create_time)` 把这批记录分流到 `stream.late_records`，
+连同 Kafka 的 partition / offset 一起存。于是「丢数」变成「可量化、可按位点回放、可对账」。
+
+> Flink 1.18 的窗口 TVF 没有 allowed-lateness 参数，乱序容忍度完全由 watermark 延迟决定 ——
+> 设大了窗口出结果慢，设小了落兜底表的数据多。5 分钟是按上游乱序分布定的。
+
+### 5. Doris 三种模型，按「谁做聚合」分工
+
+| 模型 | 用在哪 | 为什么 |
+|------|--------|--------|
+| Unique + MoW | `dwd.order_snapshot`、两张窗口表 | Flink 已算完整窗口，按主键覆盖 → 重放幂等 |
+| Aggregate + SUM/BITMAP | `dws.user_active_daily` | Doris 自己从明细滚上来，需要 SUM 语义 |
+
+这个分界很容易踩坑：窗口表如果建成 Aggregate + SUM，作业重启重放时同一个窗口会被
+再加一遍，GMV 直接翻倍 —— **Aggregate + SUM 不是幂等的**。
+反过来，Aggregate 表的刷新任务必须「先删当天分区再写」，幂等性由刷新任务自己保证。
+
+### 6. BITMAP：跨天精确去重
+
+窗口表里的 `order_user_cnt` 是 Flink 在窗口状态里算的精确去重值，但**只在那个窗口内有效**。
+一个用户在 10:01 和 10:05 各下一单，两个窗口各记一个，SUM 起来得 2。
+跨窗口、跨天的去重，聚合结果本身根本合并不了。
+
+常规做法是回明细 `COUNT(DISTINCT)`：查一次扫一次全量，问「最近 30 天独立用户」
+就得扫 30 个分区的全部明细。
+
+BITMAP 把「当天有哪些用户」这个集合本身存下来，之后
+`BITMAP_UNION_COUNT(uv_bitmap)` 在压缩位图上做或运算，不回明细、结果精确。
+
+### 7. 常驻流作业 vs 独立调度
+
+| | 谁管生命周期 | 失败了怎么办 |
+|---|---|---|
+| `rtdw-dwd` / `rtdw-dws` | Flink 自己 | checkpoint 自动重启，从上次位点追赶积压 |
+| ADS 刷新 / 对账 | Airflow | 重试，跑挂了不影响任何常驻进程 |
+
+拆开的理由是故障隔离：调度器重启不会带断实时链路，批任务也不会占满 Flink 的 slot。
+
+主链路本身也拆成两个作业而不是一个 STATEMENT SET —— DWS 的窗口聚合是有状态大户，
+改窗口口径要重启；DWD 只是无状态清洗，没必要跟着停（停了等于业务库到数仓的入口断了）。
 
 ---
 
-## 核心功能演示
+## Agent + MCP 链路监控（`ops_agent/`）
 
-### NL2SQL 查询
+把「链路健不健康」这件事从「挨个打开 Flink UI / Kafka UI / Doris 控制台」
+变成「问一句话」。
+
 ```
-用户：每个月的GMV是多少？
-系统：[自动生成SQL] SELECT ym, round(gmv,0) FROM ads.monthly_kpi ORDER BY ym
-      [执行结果] 24个月数据，2017-11月峰值...
-      [AI洞察] 黑色星期五当天GMV是日均的6.8倍...
+probes.py      三个探针
+               Flink REST   作业状态 / checkpoint 失败 / 背压
+               Kafka Lag    消费组积压（最新 offset - 已提交 offset）
+               Doris        SHOW BACKENDS / 导入失败率 / 动态分区探活
+     ↓
+inspector.py   汇总成健康卡；有异常时才调 LLM 做归因，
+               给出反压 / 数据倾斜 / 资源不足等方向的处置建议
+     ↓
+mcp_server.py  封装成 6 个标准 MCP 工具，任何 MCP 客户端都能调
 ```
 
-### RAG 知识问答
-```
-用户：GMV和销售额有什么区别？
-系统：[检索知识库] 相似度0.693...
-      GMV包含所有状态订单（含取消），反映平台交易规模；
-      实际销售额只计算delivered订单，反映真实成交。
+**为什么用 MCP 而不是直接写成 LangChain @tool**：MCP 是模型无关、客户端无关的协议，
+同一套工具 Claude Desktop 能用、Cursor 能用、自建 Agent 也能用，不锁定框架；
+工具的 schema 与参数校验由协议标准化。
+
+命令行直接用：
+
+```bash
+python -m ops_agent.inspector          # 打印健康卡
+python -m ops_agent.inspector "现在链路有没有积压"   # 带问题就走 LLM 归因
+python -m ops_agent.collect --interval 60   # 定时采集作业指标进 stream.job_metrics
 ```
 
-### Agent 自动分析
-```
-用户：分析2018年上半年销售趋势
-Agent步骤1：查知识库，了解GMV定义
-Agent步骤2：查月度数据（发现SQL格式错误，自动纠错）
-Agent步骤3：追加查订单状态分布（自主决策）
-Agent步骤4：追加查配送时效（自主决策）
-Agent步骤5：追加查取消率（自主决策）
-...
-Agent结论：2月受巴西狂欢节影响GMV最低，4-5月春季旺季...
+注册成 MCP server（Claude Desktop / Cursor 的配置文件）：
+
+```json
+{
+  "mcpServers": {
+    "realtime-dw-ops": {
+      "command": "python",
+      "args": ["-m", "ops_agent.mcp_server"],
+      "cwd": "E:/ai-data-warehouse"
+    }
+  }
+}
 ```
 
 ---
@@ -161,131 +231,183 @@ Agent结论：2月受巴西狂欢节影响GMV最低，4-5月春季旺季...
 ## 快速启动
 
 ### 前置要求
-- Docker Desktop
-- Python 3.11+
-- DeepSeek API Key（[申请地址](https://platform.deepseek.com)）
 
-### 1. 启动基础服务
+- Docker Desktop，分配给 Linux VM **至少 7GB 内存**（Doris BE + Flink TaskManager 合计约 4GB）
+- Python 3.11+
+- PowerShell（Windows 自带的 5.1 即可，`pwsh` 7 也行；两个 Flink 脚本都做了兼容）
+- DeepSeek API Key（可选，不配也能跑，AI 功能降级为规则模式）
+
+> **Linux/WSL 必做**：Doris BE 要求 `vm.max_map_count >= 2000000`
+> ```bash
+> sudo sysctl -w vm.max_map_count=2000000
+> ```
+> Windows Docker Desktop 用户在 WSL 里执行同样命令。
+
+### 1. 下载 Flink connector
+
 ```bash
-git clone https://github.com/你的用户名/ai-data-warehouse.git
-cd ai-data-warehouse
-docker-compose up -d
+pwsh flink/download_jars.ps1
 ```
 
-### 2. 安装依赖
+拉四个 jar 到 `flink/lib/`：mysql-cdc、kafka、doris、mysql-jdbc。
+版本号后缀必须和 Flink 主版本严格对上，脚本里已经钉死。
+
+### 2. 启动基础设施
+
+```bash
+docker compose up -d
+```
+
+默认只起主链路必需的 7 个容器：Zookeeper、Kafka、MySQL、Doris FE/BE、Flink JM/TM。
+Kafka UI 和 Airflow 放在可选 profile 里，主链路不依赖它们，需要时再起：
+
+```bash
+docker compose --profile tools up -d kafka-ui
+```
+
+```bash
+docker compose --profile scheduler up -d airflow
+```
+
+Doris FE 首次启动约需 1~2 分钟。`doris-init` 容器会等 BE 注册完成后自动执行
+`doris/init/*.sql` 建库建表。看进度：
+
+```bash
+docker logs -f ai_dw_doris_init
+```
+
+MySQL 会自动执行 `mysql/init/01_business_schema.sql` 建业务库与维表初始数据。
+
+### 3. 安装依赖并配置
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
 ```bash
-# Windows
-set DEEPSEEK_API_KEY=your_api_key_here
-
-# Mac/Linux
-export DEEPSEEK_API_KEY=your_api_key_here
+cp .env.example .env
 ```
 
-### 4. 初始化数仓
-```bash
-# 下载数据集（需要 Kaggle 账号）
-# https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce
-# 将 CSV 文件放入 data/raw/
+然后按需填入 `DEEPSEEK_API_KEY`。其余默认值对应 docker-compose 里的服务，不用改。
 
-# 运行 ETL
-python pipelines/etl_ods.py
-python pipelines/etl_dwd.py
-python pipelines/etl_dws_ads.py
-python pipelines/verify.py  # 验收
+### 4. 灌业务数据（写 MySQL，不碰 Kafka）
+
+```bash
+python mock/business_simulator.py --seed-dim
 ```
 
-### 5. 构建知识库
 ```bash
-python ai_layer/rag_engine.py
+python mock/business_simulator.py --rate 20
 ```
 
-### 6. 启动 AI 数仓助手
-```bash
-# 历史数据查询 + RAG + Agent
-streamlit run app/dashboard_v3.py
+保持这个进程一直开着。它每秒新建 20 单，并按状态机推进已有订单，
+每次流转都是一条 UPDATE。加 `--burst` 可以周期性制造流量尖峰，用来观察背压。
 
-# 实时流处理
-python kafka/producer.py --rate 5
-python kafka/stream_processor.py
+### 5. 提交 Flink 作业
+
+```bash
+pwsh flink/submit.ps1
+```
+
+先提交 `rtdw-dwd`（CDC → 清洗打宽 → Kafka + 订单快照），
+等 20 秒 topic 建出来后提交 `rtdw-dws`（窗口聚合 → Doris + 迟到分流）。
+
+第一批窗口结果约 1 分钟后出现 —— Flink 要等 watermark 越过窗口终点才触发输出。
+
+### 6. 看板与刷新
+
+```bash
+streamlit run app/realtime_dashboard.py
+```
+
+```bash
+python pipelines/refresh_ads.py
+```
+
+排行榜和 BITMAP 日活由这个脚本刷新。生产上它挂在 Airflow 的 `ads_refresh` DAG 上，
+每 10 分钟一次；本地手动跑一次即可看到维度下钻那一栏出数。
+
+### 7. 可选组件
+
+```bash
+python quality/checker.py                 # AI 质检器（常驻，每分钟一轮）
+python pipelines/reconcile.py             # 对账，结果落 ads.reconcile_result
+python -m ops_agent.inspector             # 链路健康卡
+streamlit run app/dashboard_v3.py         # NL2SQL + RAG + Agent 问答界面
+python -m ai_layer.rag_engine             # 首次使用问答前先构建向量知识库
+python eval/eval_nl2sql.py                # NL2SQL 评估集
 ```
 
 ### 访问地址
 
-| 服务 | 地址 |
-|------|------|
-| AI 数仓助手 | http://localhost:8501 |
-| Kafka UI | http://localhost:8090 |
-| Airflow | http://localhost:8080 |
-| ClickHouse Play | http://localhost:8123/play |
+| 服务 | 地址 | 账号 |
+|------|------|------|
+| Flink Web UI | http://localhost:8081 | — |
+| Kafka UI（可选，`--profile tools`） | http://localhost:8090 | — |
+| Doris FE | http://localhost:8030 | root / 空 |
+| Doris MySQL 协议 | `mysql -h127.0.0.1 -P9030 -uroot` | — |
+| Airflow（可选，`--profile scheduler`） | http://localhost:8080 | admin / admin123 |
+| 业务库 MySQL | `mysql -h127.0.0.1 -P3306 -uroot -proot123 mall` | — |
+
+### 常用运维
+
+```bash
+pwsh flink/submit.ps1 -Status
+```
+
+```bash
+pwsh flink/submit.ps1 -Stop
+```
+
+`-Stop` 会给每个作业各打一个 savepoint 再停 —— 直接 cancel 会丢掉算子状态，
+下次启动只能从 Kafka 位点重放，窗口里攒了一半的数据全部作废。
 
 ---
 
 ## 项目结构
 
 ```
-ai-data-warehouse/
-├── clickhouse/
-│   └── init/
-│       ├── 01_init_tables.sql      # 历史数仓建表
-│       └── 02_kafka_stream.sql     # 流式表结构
+├── mysql/init/                 业务库建表 + 维表初始数据
+├── mock/business_simulator.py  订单状态机模拟器（只写 MySQL）
+├── flink/
+│   ├── sql/00_init.sql         CDC 源 / Kafka 分层 / Doris sink 定义
+│   ├── sql/10_dwd_job.sql      作业 rtdw-dwd：清洗打宽 + 订单快照
+│   ├── sql/20_dws_job.sql      作业 rtdw-dws：窗口聚合 + 迟到分流
+│   ├── ai_risk/                PyFlink AI 风控算子（可选，async I/O + 规则预筛）
+│   ├── download_jars.ps1       拉 connector jar
+│   └── submit.ps1              提交 / 查状态 / 带 savepoint 停止
+├── doris/init/                 分层建表（DWD / DWS / ADS / stream）
 ├── pipelines/
-│   ├── etl_ods.py                  # ODS 层加载
-│   ├── etl_dwd.py                  # DWD 层加工
-│   ├── etl_dws_ads.py              # DWS/ADS 层聚合
-│   ├── verify.py                   # 四层验收
-│   └── dag_daily_pipeline.py       # Airflow DAG
-├── knowledge_base/
-│   ├── 01_data_dict.md             # 数据字典
-│   ├── 02_metrics.md               # 指标口径
-│   └── 03_business_rules.md        # 业务规则
-├── ai_layer/
-│   ├── nl2sql.py                   # 自然语言转SQL
-│   ├── rag_engine.py               # RAG 知识库
-│   ├── agent_tools.py              # Agent 工具集
-│   └── agents.py                   # 三个专用 Agent
-├── kafka/
-│   ├── producer.py                 # 实时订单生产者
-│   ├── stream_processor.py         # AI 流处理器
-│   └── dag_realtime_stream.py      # 实时调度 DAG
+│   ├── refresh_ads.py          ADS 刷新 + BITMAP 日活
+│   ├── reconcile.py            业务库 ↔ 数仓对账
+│   └── dag_*.py                Airflow DAG（与流作业运行时分离）
+├── quality/checker.py          AI 质检器：规则先判、命中才调 LLM
+├── ops_agent/                  链路监控探针 + 健康卡 + MCP server
 ├── app/
-│   ├── dashboard.py                # v1：NL2SQL
-│   ├── dashboard_v2.py             # v2：+RAG
-│   ├── dashboard_v3.py             # v3：+Agent
-│   └── realtime_dashboard.py       # 实时监控看板
-├── reports/                        # Agent 生成的分析报告
-├── docker-compose.yml              # 一键启动
-└── requirements.txt                # Python 依赖
+│   ├── realtime_dashboard.py   实时监控看板
+│   └── dashboard_v3.py         NL2SQL + RAG + Agent 问答
+├── ai_layer/
+│   ├── nl2sql.py               自然语言转 Doris SQL
+│   ├── sql_guard.py            只读校验 + 项目口径陷阱检查
+│   ├── router.py               查数 / 问概念 的路由
+│   ├── rag_engine.py           知识库向量检索
+│   └── agents.py               异常分析 / 周报 / 自由分析 Agent
+├── knowledge_base/             数据字典 · 指标口径 · 业务规则
+├── eval/                       NL2SQL 评估集与评估脚本
+└── common/doris_client.py      Doris 统一访问层（查询 + Stream Load）
 ```
 
 ---
 
-## 数据集
+## 数据
 
-使用 [Kaggle Olist 巴西电商数据集](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)，包含 2016-2018 年真实交易数据：
-
-| 文件 | 描述 | 行数 |
-|------|------|------|
-| olist_orders_dataset.csv | 订单主表 | 99,441 |
-| olist_order_items_dataset.csv | 订单商品明细 | 112,650 |
-| olist_customers_dataset.csv | 用户信息 | 99,441 |
-| olist_products_dataset.csv | 商品信息 | 32,951 |
-
----
-
-## 技术亮点
-
-1. **Tool Calling 解决 LLM 兼容性问题**：ReAct 框架与 DeepSeek 输出格式不匹配导致死循环，改用 Function Calling JSON 协议彻底解决
-2. **Agent 自主纠错能力**：SQL 中文别名报错后 Agent 自动换英文别名重试，无需人工干预
-3. **规则+AI 双重检测**：流处理中正常情况0次LLM调用，规则触发异常后才调 AI，节省99%+推理成本
-4. **批流一体架构**：历史数据和实时数据共用同一套表结构，NL2SQL 透明访问两套数据
+没有外部数据集依赖。业务数据全部由 `mock/business_simulator.py` 实时生成 ——
+1000 个 SKU、5000 个用户、15 个三级品类、26 个省份 7 个大区，
+订单按状态机推进，时间被压缩（真实世界的「下单到收货三天」在这里是几十秒），
+否则跑一整天也看不到一个完整生命周期。
 
 ---
 
 ## License
 
-MIT License - 详见 [LICENSE](LICENSE) 文件
+MIT

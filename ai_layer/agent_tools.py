@@ -4,23 +4,24 @@ Agent 工具集
 定义 Agent 可以调用的所有工具：数据查询、知识检索、洞察生成、报告输出
 """
 
-import os
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import re
 import json
 from datetime import datetime
-import clickhouse_connect
+from common.doris_client import get_client
 import pandas as pd
 from openai import OpenAI
 from langchain.tools import tool
 
-CH_HOST     = os.getenv('CLICKHOUSE_HOST', 'localhost')
-CH_PORT     = int(os.getenv('CLICKHOUSE_PORT', '8123'))
-CH_USER     = os.getenv('CLICKHOUSE_USER', 'admin')
-CH_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', 'admin123')
+CH_HOST     = os.getenv('DORIS_HOST', 'localhost')
+CH_PORT     = int(os.getenv('DORIS_QUERY_PORT', '9030'))
+CH_USER     = os.getenv('DORIS_USER', 'root')
+CH_PASSWORD = os.getenv('DORIS_PASSWORD', '')
 
 
 def get_ch():
-    return clickhouse_connect.get_client(
+    return get_client(
         host=CH_HOST, port=CH_PORT,
         username=CH_USER, password=CH_PASSWORD
     )
@@ -37,7 +38,7 @@ def get_llm():
 @tool
 def query_data(sql: str) -> str:
     """
-    在 ClickHouse 数仓执行 SQL 查询，返回结果。
+    在 Doris 数仓执行 SQL 查询，返回结果。
     输入：合法的 SELECT SQL 语句。
     输出：查询结果的 Markdown 表格字符串。
     注意：只支持 SELECT 查询，不支持写操作。
@@ -81,19 +82,25 @@ def nl_query(question: str) -> str:
         llm = get_llm()
 
         # 获取 schema
+        # 与 ai_layer/nl2sql.py 的 TABLE_DESCRIPTIONS 保持同一份认知，
+        # 避免 Agent 和 NL2SQL 对同一个库有两套说法
         tables = {
-            'dws.order_daily':      '每日销售汇总，含dt日期、gmv、order_cnt、user_cnt、avg_order_value',
-            'dws.category_daily':   '每日品类汇总，含dt、product_category、gmv、order_cnt',
-            'ads.monthly_kpi':      '月度KPI，含ym年月、gmv、order_cnt、user_cnt、mom_gmv_rate环比',
-            'ads.state_sales_rank': '省份月度排行，含dt_month、state、gmv、order_cnt、rank_by_gmv',
-            'dwd.order_detail':     '订单明细，含order_date、state、product_category、price、order_status、delivery_days',
+            'dwd.order_snapshot':    '订单累积快照，一单一行记录当前状态。含 create_date、order_id、'
+                                     'order_status、total_amount、region_name、pay_lag_seconds',
+            'dws.trade_window_agg':  '交易域窗口聚合，GMV 字段名是 order_amount。'
+                                     'window_type=TUMBLE_1M/CUMULATE_1D；'
+                                     'category1_name 与 region_name 取 ALL 表示汇总粒度',
+            'dws.pay_window_agg':    '支付域窗口聚合，含 pay_cnt、pay_amount，维度 payment_type',
+            'dws.user_active_daily': '用户日活，uv_bitmap 为 BITMAP 类型，跨天去重用 BITMAP_UNION_COUNT',
+            'ads.category_rank':     '当日品类排行，含 category1_name、gmv、rank_by_gmv、gmv_share_pct',
+            'ads.region_rank':       '当日大区排行，含 region_name、gmv、uv、rank_by_gmv',
         }
         schema_parts = []
         for table, desc in tables.items():
             db, tbl = table.split('.')
             cols = ch.query(
-                f"SELECT name,type FROM system.columns "
-                f"WHERE database='{db}' AND table='{tbl}' ORDER BY position"
+                f"SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.columns "
+                f"WHERE TABLE_SCHEMA='{db}' AND TABLE_NAME='{tbl}' ORDER BY ORDINAL_POSITION"
             ).result_rows
             col_lines = [f"  {c[0]} {c[1]}" for c in cols if not c[0].startswith('_')]
             schema_parts.append(f"-- {desc}\n{table}:\n" + "\n".join(col_lines))
@@ -102,8 +109,15 @@ def nl_query(question: str) -> str:
         resp = llm.chat.completions.create(
             model='deepseek-chat',
             messages=[
-                {'role': 'system', 'content': f"""将自然语言转为 ClickHouse SQL。
-规则：只返回SELECT SQL不加分号；dwd层用price字段不用gmv；查地域用ads.state_sales_rank。
+                {'role': 'system', 'content': f"""将自然语言转为 Doris SQL（MySQL 兼容语法）。
+规则：只返回 SELECT SQL 不加分号；GMV 在 dws.trade_window_agg 里叫 order_amount；
+     排行优先查 ads.category_rank / ads.region_rank，不要自己聚合再排序；
+     订单状态、取消率、支付转化率只能查 dwd.order_snapshot（状态问题，不是事件计数）。
+方言：用 COUNT(*) 不用 count()；不用 countIf/argMax/toYYYYMM 等 ClickHouse 函数；
+     不写 FINAL；日期用 DATE_FORMAT/DATE_SUB；UV 用 BITMAP_UNION_COUNT(uv_bitmap)。
+粒度陷阱：dws.trade_window_agg 必须带 window_type 过滤，且 category1_name 与
+     region_name 两列必须同时约束（'ALL' 是汇总粒度），只约束一个会重复计数。
+     order_user_cnt 只在单窗口内有效，跨窗口/跨天的 UV 必须查 dws.user_active_daily。
 表结构：{schema}"""},
                 {'role': 'user', 'content': question}
             ],
